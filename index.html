@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="styles.css" />
   <script defer src="vendor/clipper.js"></script>
   <script defer src="pdf.js"></script>
+  <script defer src="scaffold-rules.js"></script>
   <script defer src="app.js"></script>
 </head>
 <body>
@@ -32,8 +33,22 @@
         <div class="setting-row"><label for="heightInput">최종 높이 (탭 포함)</label><div class="input-with-unit"><input id="heightInput" type="number" min="50" max="400" step="0.1" value="148.5"/><span>mm</span></div></div>
         <div class="setting-row"><label for="webInput">목 보강 웹 폭</label><div class="input-with-unit"><input id="webInput" type="number" min="4" max="30" step="0.5" value="10"/><span>mm</span></div></div>
         <div class="setting-row"><label for="gapInput">국소 gap-fill</label><div class="input-with-unit"><input id="gapInput" type="number" min="0" max="12" step="0.5" value="4"/><span>mm</span></div></div>
+        <div class="scaffold-card">
+          <div class="scaffold-head"><span>중앙 스캐폴드 <i>자동</i></span><output id="scaffoldWidth" aria-live="polite">처리 후 계산</output></div>
+          <p id="scaffoldMeta">오프셋·보강 후 아웃라인 폭에 따라 결정</p>
+          <p id="tabWarning" class="tab-warning hidden" role="status"></p>
+          <details class="scaffold-tiers"><summary>자동 폭 단계 보기</summary>
+            <table><thead><tr><th>아웃라인 폭 W</th><th>스캐폴드 폭</th></tr></thead><tbody>
+              <tr><td>W &lt; 50 mm</td><td>W × 60%</td></tr>
+              <tr><td>50 ≤ W &lt; 100 mm</td><td>30 mm</td></tr>
+              <tr><td>100 ≤ W &lt; 150 mm</td><td>50 mm</td></tr>
+              <tr><td>150 ≤ W &lt; 200 mm</td><td>70 mm</td></tr>
+              <tr><td>W ≥ 200 mm</td><td>90 mm</td></tr>
+            </tbody></table>
+            <p>본품 실루엣은 유지하고, 상단 1/3에 닿지 않는 스캐폴드 조각만 합칩니다.</p>
+          </details>
+        </div>
         <details class="advanced"><summary>센터탭 상세값</summary>
-          <div class="setting-row"><label>스캐폴드 폭</label><div class="input-with-unit"><input id="scaffoldInput" type="number" value="50" min="20" max="100"/><span>mm</span></div></div>
           <div class="setting-row"><label>탭 폭 × 깊이</label><div class="input-pair"><input id="tabWidthInput" type="number" value="30" min="10" max="60"/><b>×</b><input id="tabDepthInput" type="number" value="3" min="1" max="10"/><span>mm</span></div></div>
           <div class="setting-row"><label>탭 끝 테이퍼 / R</label><div class="input-pair"><input id="taperInput" type="number" value="1" min="0" max="5" step="0.1"/><input id="tipRadiusInput" type="number" value="0.75" min="0" max="3" step="0.05"/><span>mm</span></div></div>
           <div class="setting-row"><label>작은 조각 제거</label><div class="input-with-unit"><input id="speckInput" type="number" value="1" min="0" max="20" step="0.1"/><span>mm²</span></div></div>
@@ -42,7 +57,7 @@
         <button id="processBtn" class="primary-button" disabled><span>▶</span> 파이프라인 실행</button>
         <div id="pipelineStatus" class="status-line">이미지를 선택하면 시작할 수 있습니다.</div>
         <ol class="pipeline-list">
-          <li>알파 마스크 · 잔여물/홀 정리</li><li>2mm 바깥 오프셋 · 10mm 목 웹</li><li>센터탭 Boolean · 국소 4mm 메움</li><li>탭 직결 · 단일 외곽 검증</li>
+          <li>알파 마스크 · 잔여물/홀 정리</li><li>바깥 오프셋 · 목 보강 웹</li><li>스캐폴드 조각 선별 · 국소 gap-fill</li><li>탭 직결 · 단일 외곽 검증</li>
         </ol>
       </section>
 

@@ -8,6 +8,7 @@
     pdfBtn:$('pdfBtn'),svgBtn:$('svgBtn'),pngBtn:$('pngBtn'),jsonBtn:$('jsonBtn'),toast:$('toast'),
     whiteSwatch:$('whiteSwatch'),whiteCustom:$('whiteCustom'),whiteCustomWrap:$('whiteCustomWrap'),cutSwatch:$('cutSwatch'),
     whitePreview:$('whitePreview'),whiteInfo:$('whiteInfo'),outputName:$('outputName'),
+    scaffoldWidth:$('scaffoldWidth'),scaffoldMeta:$('scaffoldMeta'),tabWarning:$('tabWarning'),
     metricStatus:$('metricStatus'),metricSize:$('metricSize'),metricComponents:$('metricComponents'),metricHoles:$('metricHoles'),metricWebs:$('metricWebs')
   };
   const state={file:null,sourceBitmap:null,artCanvas:null,overlayCanvas:null,w:0,h:0,ppm:0,artMask:null,whitePaths:[],whiteAreaMm2:0,autoMask:null,mask:null,tool:'brush',painting:false,lastPoint:null,history:[],metrics:null,sourceName:'',cursor:null,dirty:false,customFileName:false,busy:false,loadVersion:0};
@@ -18,7 +19,7 @@
     const number=(id,fallback)=>{const el=$(id),value=Number(el.value);return el.value!==''&&Number.isFinite(value)?value:fallback;};
     const height=number('heightInput',148.5),tabDepth=number('tabDepthInput',3),offset=number('offsetInput',2);
     return {targetHeight:height,offset,webWidth:number('webInput',10),gap:number('gapInput',4),
-      scaffold:number('scaffoldInput',50),tabWidth:number('tabWidthInput',30),tabDepth,
+      tabWidth:number('tabWidthInput',30),tabDepth,
       taper:number('taperInput',1),tipR:number('tipRadiusInput',.75),speck:number('speckInput',1),alpha:number('alphaInput',8)};
   }
   function setStatus(text,kind=''){els.status.textContent=text;els.status.className='status-line '+kind;}
@@ -126,21 +127,29 @@
 
   async function processPipeline(){
     if(!state.file)return;const s=settings();const activeHeight=s.targetHeight-2*s.offset-s.tabDepth;
-    const settingIds=['offsetInput','heightInput','webInput','gapInput','scaffoldInput','tabWidthInput','tabDepthInput','taperInput','tipRadiusInput','speckInput','alphaInput'];
+    const settingIds=['offsetInput','heightInput','webInput','gapInput','tabWidthInput','tabDepthInput','taperInput','tipRadiusInput','speckInput','alphaInput'];
     const invalid=settingIds.map($).find(el=>el.value===''||!el.checkValidity());
     if(invalid){setStatus('설정값이 허용 범위를 벗어났습니다. 입력값을 확인하세요.','error');invalid.focus();return;}
     if(activeHeight<=10){toast('최종 높이가 외곽 여유·탭보다 너무 작습니다.');return;}
     // A failed re-run must never expose stale geometry paired with a new image.
     state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.metrics=null;state.history=[];state.dirty=false;state.busy=true;els.fileInput.disabled=true;
-    setEnabled(false);els.processBtn.disabled=true;updateWhiteInfo();setStatus('알파 마스크 정리 중…','busy');setStage(0);await sleep();
+    setEnabled(false);els.processBtn.disabled=true;updateWhiteInfo();resetScaffoldInfo('계산 중…');setStatus('알파 마스크 정리 중…','busy');setStage(0);await sleep();
     try{
       const nominalPpm=DPI/25.4,targetPx=Math.round(activeHeight*nominalPpm),crop=state.croppedCanvas;
       const scaledW=Math.max(1,Math.round(crop.width*targetPx/crop.height));const scaled=document.createElement('canvas');scaled.width=scaledW;scaled.height=targetPx;scaled.getContext('2d').drawImage(crop,0,0,scaledW,targetPx);
       const scaledData=scaled.getContext('2d').getImageData(0,0,scaledW,targetPx).data;let minX=scaledW,minY=targetPx,maxX=-1,maxY=-1;
       for(let y=0;y<targetPx;y++)for(let x=0;x<scaledW;x++)if(scaledData[(y*scaledW+x)*4+3]>s.alpha){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}
       if(maxY<minY)throw new Error('알파 임계값보다 높은 전경 픽셀이 없습니다.');
-      const activePxH=maxY-minY+1,ppm=activePxH/activeHeight,pad=Math.ceil(PAD_MM*nominalPpm),w=scaledW+pad*2,h=targetPx+pad*2;
-      const art=document.createElement('canvas');art.width=w;art.height=h;art.getContext('2d').drawImage(scaled,pad,pad);state.artCanvas=art;state.w=w;state.h=h;state.ppm=ppm;
+      const activePxH=maxY-minY+1,ppm=activePxH/activeHeight;
+      // Leave enough room even when a fixed tab is wider than a narrow body,
+      // or when an asymmetric silhouette puts its center near an image edge.
+      const possibleOutlineWidth=(maxX-minX+1)/ppm+2*(s.offset+s.webWidth/2)+4/ppm;
+      const possibleScaffold=ScaffoldRules.chooseWidth(possibleOutlineWidth).scaffoldWidthMm;
+      const safety=s.offset+s.webWidth/2+1;
+      const padX=Math.ceil(Math.max(PAD_MM,Math.max(s.tabWidth,possibleScaffold)/2+safety)*ppm);
+      const padY=Math.ceil(Math.max(PAD_MM,s.offset+s.webWidth/2+s.tabDepth+1)*ppm);
+      const w=scaledW+padX*2,h=targetPx+padY*2;
+      const art=document.createElement('canvas');art.width=w;art.height=h;art.getContext('2d').drawImage(scaled,padX,padY);state.artCanvas=art;state.w=w;state.h=h;state.ppm=ppm;
       const rgba=art.getContext('2d').getImageData(0,0,w,h).data,mask=new Uint8Array(w*h);for(let i=0;i<mask.length;i++)mask[i]=rgba[i*4+3]>s.alpha?1:0;
       const cleaned=removeSmall(mask,w,h,ppm,s.speck);
       if(!cleaned.kept)throw new Error('작은 조각 제거 후 남은 알파 영역이 없습니다. 제거 기준을 낮춰 주세요.');
@@ -152,37 +161,37 @@
       setStage(1);setStatus('외곽 오프셋 및 목 연결 감지…','busy');await sleep();
       let outline=dilate(state.artMask,w,h,s.offset*ppm);const beforeWebs=outline.slice();
       const neck=detectNecks(outline,w,h,ppm,s.webWidth);outline=neck.mask;
-      setStage(2);setStatus('센터탭 Boolean 및 4mm gap-fill…','busy');await sleep();
+      setStage(2);setStatus('스캐폴드 폭 계산 및 조각 선별 중…','busy');await sleep();
       const baseStats=stats(outline,w,h);if(baseStats.area===0)throw new Error('실루엣 마스크가 비었습니다.');
-      const rect=roundedRectMask(w,h,baseStats.cx,baseStats.minY,baseStats.maxY+1,s.scaffold*ppm,3*ppm);
-      const rectOnly=new Uint8Array(w*h);for(let i=0;i<rectOnly.length;i++)rectOnly[i]=rect[i]&&!outline[i]?1:0;
-      const cells=components(rectOnly,w,h,0,false),cellKeep=new Uint8Array(w*h),upperEnd=baseStats.minY+(baseStats.height/3);let keptCells=0,droppedCells=0;
-      for(let y=0;y<h;y++)for(let x=0;x<w;x++){const id=cells.labels[y*w+x];if(!id)continue;const c=cells.items[id-1];if(y<=upperEnd)c.upperHit=true;}
-      for(const c of cells.items){if(c.upperHit)droppedCells++;else keptCells++;}
-      for(let i=0;i<cellKeep.length;i++){const id=cells.labels[i];if(id&&!cells.items[id-1].upperHit)cellKeep[i]=1;}
-      let scaffoldUnion=outline.slice();for(let i=0;i<scaffoldUnion.length;i++)if(cellKeep[i])scaffoldUnion[i]=1;
+      // W is the full bounding width AFTER offset and neck reinforcement but
+      // BEFORE the scaffold Boolean, gap-fill and tab are applied.
+      const scaffold=ScaffoldRules.chooseWidth(baseStats.width/ppm),scaffoldWidth=scaffold.scaffoldWidthMm;
+      const rect=roundedRectMask(w,h,baseStats.cx,baseStats.minY,baseStats.maxY+1,scaffoldWidth*ppm,3*ppm);
+      const upperEnd=baseStats.minY+(baseStats.height/3);
+      const selection=ScaffoldRules.selectFragments(outline,rect,w,h,upperEnd);
+      const scaffoldUnion=selection.mask,keptCells=selection.kept,droppedCells=selection.dropped;
       const gapRadius=(s.gap/2)*ppm;let closed=scaffoldUnion;if(s.gap>0)closed=closing(scaffoldUnion,w,h,gapRadius);
       let gapPixels=0;for(let i=0;i<closed.length;i++)if(closed[i]&&!scaffoldUnion[i])gapPixels++;
-      const blend=localJunctionBlend(closed,w,h,ppm,baseStats.cx,baseStats.minY,baseStats.maxY,s.scaffold);
+      const blend=localJunctionBlend(closed,w,h,ppm,baseStats.cx,baseStats.minY,baseStats.maxY,scaffoldWidth);
       const withTab=addTab(blend.mask,w,h,baseStats.cx/ppm,(baseStats.maxY+1)/ppm,ppm,s);
       const cleanedFinal=removeSmall(withTab,w,h,ppm,s.speck).mask;const finalFilled=fillHoles(cleanedFinal,w,h);state.mask=finalFilled.mask;state.autoMask=state.mask.slice();state.history=[];
       const webAdded=beforeWebs.reduce((a,v,i)=>a+((!v&&outline[i])?1:0),0)/(ppm*ppm);
       state.metrics={source:state.sourceName,activeArtworkHeightMm:activeHeight,pixelsPerMm:ppm,globalOuterOffsetMm:s.offset,targetOverallCutHeightMm:s.targetHeight,
         actualCutSizeMm:null,componentsRemoved:cleaned.removed,componentsKept:cleaned.kept,initialHolesFilled:filled.holes,whiteChokeMm:WHITE_CHOKE_MM,whiteAreaMm2:state.whiteAreaMm2,whiteAlphaThreshold:s.alpha,whiteMinIslandAreaMm2:s.speck,whiteHolesPreserved:true,neckCoreCount:neck.cores,
         detectedWebCount:neck.webs.length,detectedWebs:neck.webs.map(x=>({...x,fromPx:x.fromPx.map(v=>v/ppm),toPx:x.toPx.map(v=>v/ppm)})),neckWebAddedAreaMm2:webAdded,
-        scaffoldWidthMm:s.scaffold,deletedUpperThirdCells:droppedCells,retainedCells:keptCells,gapFillThresholdMm:s.gap,gapFillAreaMm2:gapPixels/(ppm*ppm),
+        outlineWidthBeforeScaffoldMm:scaffold.outlineWidthMm,scaffoldWidthMm:scaffoldWidth,scaffoldTier:scaffold.tier,tabWiderThanScaffold:s.tabWidth>scaffoldWidth,tabWiderThanOutline:s.tabWidth>scaffold.outlineWidthMm,deletedUpperThirdCells:droppedCells,retainedCells:keptCells,gapFillThresholdMm:s.gap,gapFillAreaMm2:gapPixels/(ppm*ppm),
         junctionBlendCount:blend.junctions,tabWidthMm:s.tabWidth,tabDepthMm:s.tabDepth,tabTaperMm:s.taper,tabTipRadiusMm:s.tipR,finalHolesFilled:finalFilled.holes};
       state.overlayCanvas=document.createElement('canvas');state.overlayCanvas.width=w;state.overlayCanvas.height=h;
       state.dirty=JSON.stringify(s)!==JSON.stringify(settings());
-      setStage(3);render();refreshMetrics();setEnabled(true);els.undoBtn.disabled=true;els.processBtn.disabled=false;updateWhiteInfo();
+      setStage(3);render();refreshMetrics();setEnabled(true);els.undoBtn.disabled=true;els.processBtn.disabled=false;updateWhiteInfo();updateScaffoldInfo(scaffold,s.tabWidth);
       if(state.dirty){markPipelineDirty();}else if(!state.whitePaths.length){setStatus('화이트 영역이 없습니다. 제거 기준과 침식 후 형상을 확인하세요.','error');}
       else{setStatus('처리 완료 · 브러시/지우개로 직접 수정할 수 있습니다.');}toast('파이프라인 완료');
-    }catch(err){console.error(err);setStatus('오류: '+(err.message||err),'error');els.processBtn.disabled=false;setEnabled(!!state.mask);}
+    }catch(err){console.error(err);resetScaffoldInfo('계산 실패');setStatus('오류: '+(err.message||err),'error');els.processBtn.disabled=false;setEnabled(!!state.mask);}
     finally{state.busy=false;els.fileInput.disabled=false;}
   }
 
   function maskStats(){if(!state.mask)return null;const s=stats(state.mask,state.w,state.h),cc=components(state.mask,state.w,state.h,0,false);const noHoles=fillHoles(state.mask,state.w,state.h);let holes=0;for(let i=0;i<state.mask.length;i++)if(noHoles.mask[i]&&!state.mask[i])holes++;return {...s,components:cc.items.length,holes};}
-  function refreshMetrics(){if(!state.mask)return;const m=maskStats(),ppm=state.ppm,actualH=m.height/ppm,actualW=m.width/ppm;state.metrics.actualCutSizeMm=[actualW,actualH];els.metricStatus.textContent=(m.components===1&&m.holes===0)?'PASS':'검토 필요';els.metricStatus.style.color=(m.components===1&&m.holes===0)?'#15976f':'#d28524';els.metricSize.textContent=`${actualW.toFixed(1)} × ${actualH.toFixed(1)} mm`;els.metricComponents.textContent=String(m.components);els.metricHoles.textContent=String(m.holes);els.metricWebs.textContent=String(state.metrics.detectedWebCount||0);}
+  function refreshMetrics(){if(!state.mask)return;const m=maskStats(),ppm=state.ppm,actualH=m.height/ppm,actualW=m.width/ppm;state.metrics.actualCutSizeMm=[actualW,actualH];const pass=m.components===1&&m.holes===0&&!state.metrics.tabWiderThanScaffold;els.metricStatus.textContent=pass?'PASS':'검토 필요';els.metricStatus.style.color=pass?'#15976f':'#d28524';els.metricStatus.title=state.metrics.tabWiderThanScaffold?'탭이 스캐폴드보다 넓습니다. 형상을 확인하세요.':'';els.metricSize.textContent=`${actualW.toFixed(1)} × ${actualH.toFixed(1)} mm`;els.metricComponents.textContent=String(m.components);els.metricHoles.textContent=String(m.holes);els.metricWebs.textContent=String(state.metrics.detectedWebCount||0);}
   let renderQueued=false;
   function scheduleRender(){if(renderQueued)return;renderQueued=true;requestAnimationFrame(()=>{renderQueued=false;render();});}
   function render(){if(!state.mask||!state.artCanvas)return;const canvas=els.canvas,ctx=canvas.getContext('2d');canvas.width=state.w;canvas.height=state.h;ctx.clearRect(0,0,state.w,state.h);ctx.drawImage(state.artCanvas,0,0);
@@ -245,8 +254,22 @@
     if(!state.mask){els.whiteInfo.textContent='작은 조각 제거 기준과 알파 임계값은 파이프라인 설정을 사용합니다.';return;}
     els.whiteInfo.textContent=state.whitePaths.length?`화이트 면적 ${state.whiteAreaMm2.toFixed(2)} mm² · 작은 아일랜드 ${state.metrics.componentsRemoved}개 제거. 칼선 수동 편집과는 별개입니다.`:'침식 후 화이트 영역이 없습니다. 작은 조각 제거 기준과 입력 이미지를 확인하세요.';
   }
+  function resetScaffoldInfo(label='처리 후 계산'){
+    els.scaffoldWidth.textContent=label;els.scaffoldMeta.textContent='오프셋·보강 후 아웃라인 폭에 따라 결정';
+    els.tabWarning.textContent='';els.tabWarning.classList.add('hidden');
+  }
+  function updateScaffoldInfo(scaffold,tabWidth){
+    const f=n=>Number(n.toFixed(2)).toString();
+    els.scaffoldWidth.textContent=f(scaffold.scaffoldWidthMm)+' mm';
+    els.scaffoldMeta.textContent=`아웃라인 ${f(scaffold.outlineWidthMm)} mm · ${scaffold.tier} mm 구간`;
+    if(tabWidth>scaffold.scaffoldWidthMm){
+      const extra=tabWidth>scaffold.outlineWidthMm?' 본품 아웃라인보다도 넓습니다.':'';
+      els.tabWarning.textContent=`탭 폭 ${f(tabWidth)} mm는 스캐폴드보다 넓습니다.${extra} 탭 폭은 변경하지 않았으니 형상을 확인하세요.`;
+      els.tabWarning.classList.remove('hidden');
+    }else{els.tabWarning.textContent='';els.tabWarning.classList.add('hidden');}
+  }
   function markPipelineDirty(){
-    if(!state.mask)return;state.dirty=true;[els.pdfBtn,els.svgBtn,els.pngBtn,els.jsonBtn].forEach(x=>x.disabled=true);
+    if(!state.mask)return;state.dirty=true;resetScaffoldInfo('다시 실행 필요');[els.pdfBtn,els.svgBtn,els.pngBtn,els.jsonBtn].forEach(x=>x.disabled=true);
     setStatus('파이프라인 설정이 변경되었습니다. 다시 실행한 뒤 내보내세요.','error');
   }
   function spotNames(){
@@ -287,7 +310,7 @@
   function exportPng(){if(!state.mask||state.dirty)return;const c=document.createElement('canvas');c.width=state.w;c.height=state.h;const ctx=c.getContext('2d');ctx.beginPath();appendCanvasPaths(ctx,state.whitePaths);ctx.fillStyle='#fff';ctx.fill('evenodd');ctx.drawImage(state.artCanvas,0,0);const loops=boundaryLoops(state.mask,state.w,state.h);ctx.beginPath();appendCanvasPaths(ctx,loops);ctx.strokeStyle='#f21a9b';ctx.lineWidth=Math.max(2,.2*state.ppm);ctx.lineJoin='round';ctx.stroke();c.toBlob(b=>{if(b)download(filenameStem(els.outputName.value)+'.png',b);else toast('PNG 생성에 실패했습니다.');},'image/png');}
   function exportJson(){if(!state.mask||state.dirty)return;const current=maskStats();const white=els.whiteSwatch.value==='custom'?els.whiteCustom.value.trim():els.whiteSwatch.value;const report={...state.metrics,source:state.sourceName,actualCutSizeMm:[current.width/state.ppm,current.height/state.ppm],connectedComponents:current.components,internalHoles:current.holes,manualEdits:state.history.length>0,whiteSpotName:white,cutSpotName:els.cutSwatch.value.trim(),clientOnly:true};download(filenameStem(els.outputName.value)+'.json',new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));}
 
-  async function loadFile(file){if(!file)return;if(state.busy){toast('처리가 끝난 뒤 새 이미지를 선택하세요.');return;}if(!/image\/(png|webp)/.test(file.type)){toast('투명 알파가 있는 PNG 또는 WEBP 이미지를 선택하세요.');return;}const loadVersion=++state.loadVersion;state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.history=[];state.metrics=null;state.dirty=false;setEnabled(false);updateWhiteInfo();els.processBtn.disabled=true;state.file=file;state.sourceName=file.name;if(!state.customFileName)els.outputName.value=filenameStem(file.name.replace(/\.(?:png|webp)$/i,''));
+  async function loadFile(file){if(!file)return;if(state.busy){toast('처리가 끝난 뒤 새 이미지를 선택하세요.');return;}if(!/image\/(png|webp)/.test(file.type)){toast('투명 알파가 있는 PNG 또는 WEBP 이미지를 선택하세요.');return;}const loadVersion=++state.loadVersion;state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.history=[];state.metrics=null;state.dirty=false;setEnabled(false);updateWhiteInfo();resetScaffoldInfo();els.processBtn.disabled=true;state.file=file;state.sourceName=file.name;if(!state.customFileName)els.outputName.value=filenameStem(file.name.replace(/\.(?:png|webp)$/i,''));
     try{const bitmap=await createImageBitmap(file);if(loadVersion!==state.loadVersion){bitmap.close();return;}if(state.sourceBitmap)state.sourceBitmap.close();state.sourceBitmap=bitmap;const tmp=document.createElement('canvas');tmp.width=bitmap.width;tmp.height=bitmap.height;tmp.getContext('2d').drawImage(bitmap,0,0);const data=tmp.getContext('2d').getImageData(0,0,tmp.width,tmp.height).data;let minX=tmp.width,minY=tmp.height,maxX=-1,maxY=-1,hasTransparency=false;for(let y=0;y<tmp.height;y++)for(let x=0;x<tmp.width;x++){const a=data[(y*tmp.width+x)*4+3];if(a<250)hasTransparency=true;if(a>1){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}}
       if(maxX<minX)throw new Error('alpha 채널에서 전경을 찾을 수 없습니다.');if(!hasTransparency){state.file=null;els.processBtn.disabled=true;setStatus('투명 알파가 없습니다. 배경이 제거된 PNG/WEBP를 선택하세요.','error');toast('투명 알파가 있는 입력이 필요합니다.');return;}const cw=maxX-minX+1,ch=maxY-minY+1;const crop=document.createElement('canvas');crop.width=cw;crop.height=ch;crop.getContext('2d').drawImage(tmp,minX,minY,cw,ch,0,0,cw,ch);state.croppedCanvas=crop;
       els.fileMeta.classList.remove('hidden');els.fileMeta.innerHTML=`<b>${escapeHtml(file.name)}</b><br>${bitmap.width} × ${bitmap.height}px · alpha bbox ${cw} × ${ch}px`;
@@ -306,7 +329,7 @@
   els.pdfBtn.addEventListener('click',exportPdf);els.svgBtn.addEventListener('click',exportSvg);els.pngBtn.addEventListener('click',exportPng);els.jsonBtn.addEventListener('click',exportJson);
   els.whiteSwatch.addEventListener('change',()=>{const custom=els.whiteSwatch.value==='custom';els.whiteCustomWrap.classList.toggle('hidden',!custom);if(custom)els.whiteCustom.focus();});
   els.whitePreview.addEventListener('change',render);els.outputName.addEventListener('input',()=>{state.customFileName=true;});
-  ['offsetInput','heightInput','webInput','gapInput','scaffoldInput','tabWidthInput','tabDepthInput','taperInput','tipRadiusInput','speckInput','alphaInput'].forEach(id=>$(id).addEventListener('input',markPipelineDirty));
+  ['offsetInput','heightInput','webInput','gapInput','tabWidthInput','tabDepthInput','taperInput','tipRadiusInput','speckInput','alphaInput'].forEach(id=>$(id).addEventListener('input',markPipelineDirty));
   els.canvas.addEventListener('pointerdown',pointerDown);els.canvas.addEventListener('pointermove',pointerMove);els.canvas.addEventListener('pointerup',pointerUp);els.canvas.addEventListener('pointercancel',pointerUp);els.canvas.addEventListener('pointerleave',()=>{if(!state.painting){state.cursor=null;render();}});
   window.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();undo();}});
   for(const ev of ['dragenter','dragover'])els.dropZone.addEventListener(ev,e=>{e.preventDefault();els.dropZone.classList.add('dragover');});
