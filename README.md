@@ -1,29 +1,44 @@
-# Outline Studio — client-only pipeline
+# Outline Studio
 
-A static HTML/CSS/JavaScript outline editor. No backend, CDN, analytics, or upload endpoint is used. Images are decoded and processed in the user's browser; exports are created as local downloads.
+투명 PNG/WEBP의 외곽선을 편집하고 화이트·칼선을 인쇄용 별색 PDF로 내보내는 브라우저 전용 도구입니다. 이미지 처리와 파일 생성은 기기 안에서만 이루어지며, 업로드 서버·CDN·분석 도구를 사용하지 않습니다.
 
-## Run
+## 사용 방법
 
-- Open `index.html` directly in a modern Chromium/Firefox browser, or serve this folder as static files.
-- Choose a transparent PNG/WEBP and select **파이프라인 실행**.
-- Use the brush to add material or the eraser to remove it from the final cut mask. Brush size is measured in mm.
-- `Ctrl/Cmd+Z` undoes a stroke; **자동 결과로 되돌리기** discards manual edits.
-- Export the final cutline as SVG (embedded source image + vector cutline), PNG preview, or metrics JSON.
+1. `index.html`을 최신 Chrome, Edge 또는 Firefox에서 열거나 이 폴더를 정적 웹 서버로 제공하세요.
+2. **이미지 입력**에서 투명 배경 PNG/WEBP를 선택하고 설정을 확인한 뒤 **파이프라인 실행**을 누르세요.
+3. 필요하면 브러시/지우개로 최종 칼선을 편집합니다. Ctrl/Cmd+Z로 되돌릴 수 있습니다.
+4. **화이트 · 인쇄 스팟**에서 화이트 스와치 `rdg_white`, `white`, `spot_0` 또는 직접 입력을 선택하고, 칼선 스와치 이름도 입력합니다. 기본 칼선 이름은 `CutContour`입니다.
+5. 파일명을 입력하고 **PDF · 인쇄 스팟**을 누르세요. 같은 파일명은 SVG, PNG, JSON에도 적용됩니다. 브라우저 설정에 따라 다운로드 위치를 선택할 수 있습니다.
 
-## Implemented client pipeline
+## 화이트 생성
 
-1. Crop alpha > 1, threshold foreground at alpha > 8, remove components below 1 mm² and fill enclosed holes.
-2. Apply the configured outward contour offset (default 2 mm).
-3. Search for narrow necks by eroding by half the configured web width (default 5 mm radius); where two substantial cores are close and the connecting segment lies inside the silhouette, add a rounded web of the configured width (default 10 mm).
-4. Create a 50 mm-wide, full-outline-height rounded scaffold, classify rectangle-only components, and drop any that intersects the upper-third band.
-5. Apply local closing for the configured gap-fill limit (default 4 mm) and local junction blend.
-6. Add the directly attached center tab (30 × 3 mm, 1 mm taper per side, R0.75 mm end) and validate dimensions/topology.
-7. Provide brush/eraser editing directly on the final binary cut mask, with undo/reset and live component/hole/size checks.
+- 크기 조정된 입력 이미지의 알파 임계값과 **작은 조각 제거** 설정을 사용합니다. 기본값은 알파 8 초과, 아일랜드 1 mm² 미만 제거입니다. 원본 이미지를 색상 자체에서 지우는 것은 아닙니다.
+- 알파의 투명한 내부 홀은 채우지 않습니다. 정리된 알파 경계를 벡터로 추출하고 모든 바깥 경계와 내부 홀 경계에 0.15 mm 안쪽 침식을 적용합니다. 오프셋은 화면 픽셀에 반올림하지 않고 서브픽셀 벡터 좌표에서 계산합니다. 입력 알파 경계 자체는 약 300 dpi의 래스터를 기반으로 합니다.
+- 매우 얇은 부분은 침식 후 사라질 수 있습니다. 화이트 영역이 완전히 없어지면 PDF 내보내기가 중단됩니다.
+- 화이트는 원본 알파에서 생성되므로 브러시로 칼선을 수정해도 화이트 모양이 자동으로 바뀌지 않습니다. 둘의 위치 관계를 검토하세요.
 
-The default overall cut height is 148.5 mm including the center tab; input artwork is scaled to accommodate the configured offset and tab depth. Print/output dimensions are exported in physical millimetres. Manual edits may change the dimensions and connected-component checks; review the live metrics after editing.
+## PDF 인쇄 및 확인
 
-## Notes
+- PDF에는 원본 RGB 이미지(알파 포함), 화이트 벡터 면, 칼선 벡터가 포함됩니다. 화이트와 칼선은 지정한 이름의 독립적인 PDF `/Separation` **별색 분판**이며, 둘 다 오버프린트로 설정됩니다. 칼선 폭은 0.2 mm입니다. 각 요소는 별도 PDF 레이어에도 들어갑니다.
+- 별색 이름은 RIP/프린터에 설정된 이름과 대소문자까지 일치해야 합니다. 입력은 영문·숫자·일반 ASCII 기호로 제한하며 PDF 예약 색상명(`All`, `None`, `Cyan`, `Magenta`, `Yellow`, `Black`)과 중복된 화이트/칼선 이름은 허용하지 않습니다.
+- 오버프린트를 지원하지 않는 일반 PDF 뷰어에서는 화이트가 이미지를 가릴 수 있습니다. **Acrobat 출력 미리보기의 오버프린트** 또는 RIP 분판 미리보기로 화이트와 칼선을 각각 확인하세요. PNG는 일반 화면용 미리보기입니다.
+- PDF 페이지의 시각적 객체 순서가 실제 잉크 인쇄 순서를 결정하지는 않습니다. RIP에서 화이트 스팟을 해당 흰색 잉크에 매핑하고 화이트 인쇄 순서를 확인해야 합니다.
+- 원본 아트는 RGB로 유지하며 출력 ICC 프로필이나 PDF/X 인증은 포함하지 않습니다. 인쇄소가 지정한 색상 프로필, 스팟 이름, 화이트 인쇄 순서 및 실제 장비의 결과를 사전에 확인하세요.
+- SVG는 이미지와 화이트·칼선 벡터 및 스팟 이름 메타데이터를 포함하지만 **실제 별색 분판은 아닙니다**. 인쇄 별색에는 PDF를 사용하세요.
 
-- This is an in-memory client-only implementation; closing the page clears the session unless files have been exported.
-- The browser UI is an editing and geometry-checking tool, not a material strength certification.
-- The Python batch outputs and earlier reference/test bundles live outside this clean source folder and are not deleted or overwritten by this app build.
+## 칼선 파이프라인
+
+1. 투명 영역을 자르고 알파를 기준으로 작은 성분을 제거합니다. 화이트는 이 단계에서 별도 생성합니다.
+2. 칼선 실루엣의 내부 홀을 채우고 기본 2 mm 바깥 오프셋과 기본 10 mm 목 보강 웹을 적용합니다.
+3. 스캐폴드, 국소 gap-fill, 접합부와 센터탭을 만들고 연결 성분을 검사합니다.
+4. 브러시/지우개로 최종 이진 칼선 마스크를 편집하고 연결 성분·홀·크기를 확인할 수 있습니다.
+
+기본 설정은 탭을 포함한 목표 높이 148.5 mm이며 실제 편집 결과는 화면의 크기 및 연결 상태를 확인하세요. 이 도구는 재료 강도를 인증하지 않으므로 시제품 검증이 필요합니다. 세션은 브라우저 메모리에만 남습니다.
+
+## 제3자 라이브러리
+
+`vendor/clipper.js`는 Angus Johnson의 Clipper 6.4.2 JavaScript 포팅이며 Boost Software License 1.0을 따릅니다. 라이선스 전문은 `vendor/BOOST-LICENSE.txt`에 있습니다.
+
+## 개발자 테스트
+
+Node.js 20 이상에서 `node --test tests/*.test.js`를 실행하면 PDF 별색 리소스, 오버프린트, 벡터 경로와 무압축 대체 출력 등을 확인할 수 있습니다. 실제 인쇄 전에는 Acrobat 또는 RIP에서 별도 분판 확인이 필요합니다.

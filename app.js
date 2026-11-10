@@ -5,26 +5,26 @@
     fileInput:$('fileInput'),dropZone:$('dropZone'),fileMeta:$('fileMeta'),processBtn:$('processBtn'),status:$('pipelineStatus'),
     canvasWrap:$('canvasWrap'),canvas:$('editorCanvas'),emptyMessage:$('emptyMessage'),brushTool:$('brushTool'),eraserTool:$('eraserTool'),
     brushSize:$('brushSize'),brushSizeText:$('brushSizeText'),undoBtn:$('undoBtn'),resetEditsBtn:$('resetEditsBtn'),fitBtn:$('fitBtn'),
-    svgBtn:$('svgBtn'),pngBtn:$('pngBtn'),jsonBtn:$('jsonBtn'),toast:$('toast'),
+    pdfBtn:$('pdfBtn'),svgBtn:$('svgBtn'),pngBtn:$('pngBtn'),jsonBtn:$('jsonBtn'),toast:$('toast'),
+    whiteSwatch:$('whiteSwatch'),whiteCustom:$('whiteCustom'),whiteCustomWrap:$('whiteCustomWrap'),cutSwatch:$('cutSwatch'),
+    whitePreview:$('whitePreview'),whiteInfo:$('whiteInfo'),outputName:$('outputName'),
     metricStatus:$('metricStatus'),metricSize:$('metricSize'),metricComponents:$('metricComponents'),metricHoles:$('metricHoles'),metricWebs:$('metricWebs')
   };
-  const state={file:null,sourceBitmap:null,artCanvas:null,overlayCanvas:null,w:0,h:0,ppm:0,artMask:null,autoMask:null,mask:null,tool:'brush',painting:false,lastPoint:null,history:[],metrics:null,sourceName:'',cursor:null};
-  const DPI=300, ACTIVE_HEIGHT_BASE=141.5, PAD_MM=10, MIN_AREA_MM2=1, MIN_CORE_MM2=25;
+  const state={file:null,sourceBitmap:null,artCanvas:null,overlayCanvas:null,w:0,h:0,ppm:0,artMask:null,whitePaths:[],whiteAreaMm2:0,autoMask:null,mask:null,tool:'brush',painting:false,lastPoint:null,history:[],metrics:null,sourceName:'',cursor:null,dirty:false,customFileName:false,busy:false,loadVersion:0};
+  const DPI=300, PAD_MM=10, MIN_CORE_MM2=25, WHITE_CHOKE_MM=0.15;
   let toastTimer=0;
 
   function settings(){
-    const height=Number($('heightInput').value)||148.5;
-    const tabDepth=Number($('tabDepthInput').value)||3;
-    const offset=Number($('offsetInput').value)||0;
-    return {targetHeight:height,offset,webWidth:Number($('webInput').value)||10,gap:Number($('gapInput').value)||4,
-      scaffold:Number($('scaffoldInput').value)||50,tabWidth:Number($('tabWidthInput').value)||30,tabDepth,
-      taper:Number($('taperInput').value)||1,tipR:Number($('tipRadiusInput').value)||.75,
-      speck:Number($('speckInput').value)||1,alpha:Number($('alphaInput').value)||8};
+    const number=(id,fallback)=>{const el=$(id),value=Number(el.value);return el.value!==''&&Number.isFinite(value)?value:fallback;};
+    const height=number('heightInput',148.5),tabDepth=number('tabDepthInput',3),offset=number('offsetInput',2);
+    return {targetHeight:height,offset,webWidth:number('webInput',10),gap:number('gapInput',4),
+      scaffold:number('scaffoldInput',50),tabWidth:number('tabWidthInput',30),tabDepth,
+      taper:number('taperInput',1),tipR:number('tipRadiusInput',.75),speck:number('speckInput',1),alpha:number('alphaInput',8)};
   }
   function setStatus(text,kind=''){els.status.textContent=text;els.status.className='status-line '+kind;}
   function toast(text){els.toast.textContent=text;els.toast.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>els.toast.classList.remove('show'),2200);}
   function setStage(index){document.querySelectorAll('.pipeline-list li').forEach((li,i)=>{li.classList.toggle('done',i<index);li.classList.toggle('active',i===index);});}
-  function setEnabled(on){[els.brushTool,els.eraserTool,els.brushSize,els.undoBtn,els.resetEditsBtn,els.fitBtn,els.svgBtn,els.pngBtn,els.jsonBtn].forEach(x=>x.disabled=!on);}
+  function setEnabled(on){[els.brushTool,els.eraserTool,els.brushSize,els.undoBtn,els.resetEditsBtn,els.fitBtn,els.pdfBtn,els.svgBtn,els.pngBtn,els.jsonBtn].forEach(x=>x.disabled=!on);}
   function sleep(){return new Promise(r=>setTimeout(r,20));}
   function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
 
@@ -126,8 +126,13 @@
 
   async function processPipeline(){
     if(!state.file)return;const s=settings();const activeHeight=s.targetHeight-2*s.offset-s.tabDepth;
+    const settingIds=['offsetInput','heightInput','webInput','gapInput','scaffoldInput','tabWidthInput','tabDepthInput','taperInput','tipRadiusInput','speckInput','alphaInput'];
+    const invalid=settingIds.map($).find(el=>el.value===''||!el.checkValidity());
+    if(invalid){setStatus('설정값이 허용 범위를 벗어났습니다. 입력값을 확인하세요.','error');invalid.focus();return;}
     if(activeHeight<=10){toast('최종 높이가 외곽 여유·탭보다 너무 작습니다.');return;}
-    setEnabled(false);els.processBtn.disabled=true;setStatus('알파 마스크 정리 중…','busy');setStage(0);await sleep();
+    // A failed re-run must never expose stale geometry paired with a new image.
+    state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.metrics=null;state.history=[];state.dirty=false;state.busy=true;els.fileInput.disabled=true;
+    setEnabled(false);els.processBtn.disabled=true;updateWhiteInfo();setStatus('알파 마스크 정리 중…','busy');setStage(0);await sleep();
     try{
       const nominalPpm=DPI/25.4,targetPx=Math.round(activeHeight*nominalPpm),crop=state.croppedCanvas;
       const scaledW=Math.max(1,Math.round(crop.width*targetPx/crop.height));const scaled=document.createElement('canvas');scaled.width=scaledW;scaled.height=targetPx;scaled.getContext('2d').drawImage(crop,0,0,scaledW,targetPx);
@@ -137,8 +142,14 @@
       const activePxH=maxY-minY+1,ppm=activePxH/activeHeight,pad=Math.ceil(PAD_MM*nominalPpm),w=scaledW+pad*2,h=targetPx+pad*2;
       const art=document.createElement('canvas');art.width=w;art.height=h;art.getContext('2d').drawImage(scaled,pad,pad);state.artCanvas=art;state.w=w;state.h=h;state.ppm=ppm;
       const rgba=art.getContext('2d').getImageData(0,0,w,h).data,mask=new Uint8Array(w*h);for(let i=0;i<mask.length;i++)mask[i]=rgba[i*4+3]>s.alpha?1:0;
-      const cleaned=removeSmall(mask,w,h,ppm,s.speck),filled=fillHoles(cleaned.mask,w,h);state.artMask=filled.mask;
-      setStage(1);setStatus('2mm 외곽 오프셋 및 목 연결 감지…','busy');await sleep();
+      const cleaned=removeSmall(mask,w,h,ppm,s.speck);
+      if(!cleaned.kept)throw new Error('작은 조각 제거 후 남은 알파 영역이 없습니다. 제거 기준을 낮춰 주세요.');
+      // Unlike the cut silhouette, the white spot retains transparent holes.
+      setStatus('화이트 0.15mm 안쪽 오프셋 및 벡터화 중…','busy');await sleep();
+      state.whitePaths=makeWhitePaths(cleaned.mask,w,h,ppm,WHITE_CHOKE_MM);
+      state.whiteAreaMm2=pathsArea(state.whitePaths)/(ppm*ppm);
+      const filled=fillHoles(cleaned.mask,w,h);state.artMask=filled.mask;
+      setStage(1);setStatus('외곽 오프셋 및 목 연결 감지…','busy');await sleep();
       let outline=dilate(state.artMask,w,h,s.offset*ppm);const beforeWebs=outline.slice();
       const neck=detectNecks(outline,w,h,ppm,s.webWidth);outline=neck.mask;
       setStage(2);setStatus('센터탭 Boolean 및 4mm gap-fill…','busy');await sleep();
@@ -157,13 +168,17 @@
       const cleanedFinal=removeSmall(withTab,w,h,ppm,s.speck).mask;const finalFilled=fillHoles(cleanedFinal,w,h);state.mask=finalFilled.mask;state.autoMask=state.mask.slice();state.history=[];
       const webAdded=beforeWebs.reduce((a,v,i)=>a+((!v&&outline[i])?1:0),0)/(ppm*ppm);
       state.metrics={source:state.sourceName,activeArtworkHeightMm:activeHeight,pixelsPerMm:ppm,globalOuterOffsetMm:s.offset,targetOverallCutHeightMm:s.targetHeight,
-        actualCutSizeMm:null,componentsRemoved:cleaned.removed,componentsKept:cleaned.kept,initialHolesFilled:filled.holes,neckCoreCount:neck.cores,
+        actualCutSizeMm:null,componentsRemoved:cleaned.removed,componentsKept:cleaned.kept,initialHolesFilled:filled.holes,whiteChokeMm:WHITE_CHOKE_MM,whiteAreaMm2:state.whiteAreaMm2,whiteAlphaThreshold:s.alpha,whiteMinIslandAreaMm2:s.speck,whiteHolesPreserved:true,neckCoreCount:neck.cores,
         detectedWebCount:neck.webs.length,detectedWebs:neck.webs.map(x=>({...x,fromPx:x.fromPx.map(v=>v/ppm),toPx:x.toPx.map(v=>v/ppm)})),neckWebAddedAreaMm2:webAdded,
         scaffoldWidthMm:s.scaffold,deletedUpperThirdCells:droppedCells,retainedCells:keptCells,gapFillThresholdMm:s.gap,gapFillAreaMm2:gapPixels/(ppm*ppm),
         junctionBlendCount:blend.junctions,tabWidthMm:s.tabWidth,tabDepthMm:s.tabDepth,tabTaperMm:s.taper,tabTipRadiusMm:s.tipR,finalHolesFilled:finalFilled.holes};
       state.overlayCanvas=document.createElement('canvas');state.overlayCanvas.width=w;state.overlayCanvas.height=h;
-      setStage(3);render();refreshMetrics();setEnabled(true);els.processBtn.disabled=false;setStatus('처리 완료 · 브러시/지우개로 직접 수정할 수 있습니다.');toast('파이프라인 완료');
+      state.dirty=JSON.stringify(s)!==JSON.stringify(settings());
+      setStage(3);render();refreshMetrics();setEnabled(true);els.undoBtn.disabled=true;els.processBtn.disabled=false;updateWhiteInfo();
+      if(state.dirty){markPipelineDirty();}else if(!state.whitePaths.length){setStatus('화이트 영역이 없습니다. 제거 기준과 침식 후 형상을 확인하세요.','error');}
+      else{setStatus('처리 완료 · 브러시/지우개로 직접 수정할 수 있습니다.');}toast('파이프라인 완료');
     }catch(err){console.error(err);setStatus('오류: '+(err.message||err),'error');els.processBtn.disabled=false;setEnabled(!!state.mask);}
+    finally{state.busy=false;els.fileInput.disabled=false;}
   }
 
   function maskStats(){if(!state.mask)return null;const s=stats(state.mask,state.w,state.h),cc=components(state.mask,state.w,state.h,0,false);const noHoles=fillHoles(state.mask,state.w,state.h);let holes=0;for(let i=0;i<state.mask.length;i++)if(noHoles.mask[i]&&!state.mask[i])holes++;return {...s,components:cc.items.length,holes};}
@@ -174,6 +189,10 @@
     const id=ctx.createImageData(state.w,state.h),d=id.data,w=state.w,h=state.h,m=state.mask;
     for(let y=0;y<h;y++)for(let x=0;x<w;x++){const i=y*w+x;if(!m[i])continue;const p=i*4;const edge=(x===0||x===w-1||y===0||y===h-1||!m[i-1]||!m[i+1]||!m[i-w]||!m[i+w]);if(edge){d[p]=242;d[p+1]=26;d[p+2]=155;d[p+3]=255;}else{d[p]=36;d[p+1]=178;d[p+2]=139;d[p+3]=42;}}
     state.overlayCanvas.getContext('2d').putImageData(id,0,0);ctx.drawImage(state.overlayCanvas,0,0);
+    if(els.whitePreview.checked&&state.whitePaths.length){
+      ctx.beginPath();appendCanvasPaths(ctx,state.whitePaths);ctx.fillStyle='rgba(40,184,222,.15)';ctx.fill('evenodd');
+      ctx.strokeStyle='rgba(18,161,204,.9)';ctx.lineWidth=Math.max(1,1.5*state.w/Math.max(canvas.clientWidth,1));ctx.stroke();
+    }
     if(state.cursor&&state.tool){const r=Number(els.brushSize.value)*state.ppm/2;ctx.beginPath();ctx.arc(state.cursor.x,state.cursor.y,r,0,Math.PI*2);ctx.strokeStyle=state.tool==='brush'?'#0c9c75':'#cc6671';ctx.lineWidth=Math.max(1,2*state.w/canvas.clientWidth);ctx.setLineDash([5,4]);ctx.stroke();ctx.setLineDash([]);}
     els.canvasWrap.classList.add('has-image');els.canvasWrap.classList.remove('empty-state');
   }
@@ -207,33 +226,91 @@
     }
     return loops;
   }
-  function maskToSvgPath(){const loops=boundaryLoops(state.mask,state.w,state.h),ppm=state.ppm;return loops.map(r=>`M ${r[0][0]/ppm} ${r[0][1]/ppm} `+r.slice(1).map(p=>`L ${p[0]/ppm} ${p[1]/ppm}`).join(' ')+' Z').join(' ');}
+  // Offset the cleaned alpha geometry in sub-pixel vector coordinates. This
+  // gives a true 0.15 mm inset rather than rounding the choke to whole pixels.
+  // All rings are offset together so transparent holes grow inward correctly.
+  function makeWhitePaths(mask,w,h,ppm,chokeMm){
+    if(typeof ClipperLib==='undefined')throw new Error('벡터 오프셋 라이브러리를 불러오지 못했습니다.');
+    const loops=boundaryLoops(mask,w,h),scale=1000;if(!loops.length)return [];
+    const subject=loops.map(r=>r.map(([x,y])=>({X:Math.round(x*scale),Y:Math.round(y*scale)})));
+    const offset=new ClipperLib.ClipperOffset(2,25),result=new ClipperLib.Paths();
+    offset.AddPaths(subject,ClipperLib.JoinType.jtRound,ClipperLib.EndType.etClosedPolygon);
+    offset.Execute(result,-chokeMm*ppm*scale);
+    return result.filter(r=>r.length>=3).map(r=>r.map(p=>[p.X/scale,p.Y/scale]));
+  }
+  function pathsArea(paths){let area=0;for(const ring of paths){for(let i=0;i<ring.length;i++){const a=ring[i],b=ring[(i+1)%ring.length];area+=(a[0]*b[1]-b[0]*a[1])/2;}}return Math.abs(area);}
+  function appendCanvasPaths(ctx,paths){for(const r of paths){if(!r.length)continue;ctx.moveTo(r[0][0],r[0][1]);for(let i=1;i<r.length;i++)ctx.lineTo(r[i][0],r[i][1]);ctx.closePath();}}
+  function pathsToSvg(paths){const n=x=>String(Math.round(x*1000)/1000);return paths.filter(r=>r.length>=3).map(r=>`M ${n(r[0][0])} ${n(r[0][1])} `+r.slice(1).map(p=>`L ${n(p[0])} ${n(p[1])}`).join(' ')+' Z').join(' ');}
+  function updateWhiteInfo(){
+    if(!state.mask){els.whiteInfo.textContent='작은 조각 제거 기준과 알파 임계값은 파이프라인 설정을 사용합니다.';return;}
+    els.whiteInfo.textContent=state.whitePaths.length?`화이트 면적 ${state.whiteAreaMm2.toFixed(2)} mm² · 작은 아일랜드 ${state.metrics.componentsRemoved}개 제거. 칼선 수동 편집과는 별개입니다.`:'침식 후 화이트 영역이 없습니다. 작은 조각 제거 기준과 입력 이미지를 확인하세요.';
+  }
+  function markPipelineDirty(){
+    if(!state.mask)return;state.dirty=true;[els.pdfBtn,els.svgBtn,els.pngBtn,els.jsonBtn].forEach(x=>x.disabled=true);
+    setStatus('파이프라인 설정이 변경되었습니다. 다시 실행한 뒤 내보내세요.','error');
+  }
+  function spotNames(){
+    const white=(els.whiteSwatch.value==='custom'?els.whiteCustom.value:els.whiteSwatch.value).trim(),cut=els.cutSwatch.value.trim();
+    const reserved=new Set(['all','none','cyan','magenta','yellow','black']);
+    for(const [label,name] of [['화이트',white],['칼선',cut]]){
+      if(!name)throw new Error(label+' 스와치 이름을 입력해 주세요.');
+      if(!/^[\x20-\x7e]+$/.test(name)||new TextEncoder().encode(name).length>127)throw new Error(label+' 스와치 이름은 영문·숫자·일반 기호로 127자 이내로 입력해 주세요.');
+      if(reserved.has(name.toLowerCase()))throw new Error(label+' 스와치 이름은 PDF 예약 색상명(All, None, Cyan, Magenta, Yellow, Black)을 사용할 수 없습니다.');
+    }
+    if(white===cut)throw new Error('화이트와 칼선에는 서로 다른 스와치 이름을 사용해 주세요.');
+    return {white,cut};
+  }
+  function filenameStem(value){
+    const name=String(value||'').trim().replace(/\.(?:pdf|svg|png|json)$/i,'').replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').replace(/[. ]+$/g,'').trim();
+    return Array.from(name||'outline-studio').slice(0,120).join('');
+  }
   function download(name,blob){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1200);}
-  function exportSvg(){if(!state.mask)return;setStatus('SVG 경로 생성 중…','busy');setTimeout(()=>{try{const path=maskToSvgPath(),s=stats(state.mask,state.w,state.h),width=state.w/state.ppm,height=state.h/state.ppm;const artUrl=state.artCanvas.toDataURL('image/png');const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${width.toFixed(4)}mm" height="${height.toFixed(4)}mm" viewBox="0 0 ${state.w} ${state.h}"><image x="0" y="0" width="${state.w}" height="${state.h}" href="${artUrl}"/><path d="${path}" fill="none" stroke="#f21a9b" stroke-width="0.2mm" stroke-linejoin="round" stroke-linecap="round"/></svg>`;download('outline-studio-cutline.svg',new Blob([svg],{type:'image/svg+xml'}));setStatus('SVG 다운로드 완료.');}catch(e){console.error(e);setStatus('SVG 생성 실패: '+e.message,'error');}},30);}
-  function exportPng(){if(!state.mask)return;const c=document.createElement('canvas');c.width=state.w;c.height=state.h;const ctx=c.getContext('2d');ctx.drawImage(state.artCanvas,0,0);const loops=boundaryLoops(state.mask,state.w,state.h);ctx.beginPath();for(const r of loops){ctx.moveTo(r[0][0],r[0][1]);for(let i=1;i<r.length;i++)ctx.lineTo(r[i][0],r[i][1]);ctx.closePath();}ctx.strokeStyle='#f21a9b';ctx.lineWidth=Math.max(2,.2*state.ppm);ctx.lineJoin='round';ctx.stroke();c.toBlob(b=>download('outline-studio-preview.png',b),'image/png');}
-  function exportJson(){if(!state.mask)return;const current=maskStats();const report={...state.metrics,source:state.sourceName,actualCutSizeMm:[current.width/state.ppm,current.height/state.ppm],connectedComponents:current.components,internalHoles:current.holes,manualEdits:state.history.length>0,clientOnly:true};download('outline-studio-metrics.json',new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));}
+  function exportSvg(){
+    if(!state.mask||state.dirty)return;setStatus('SVG 벡터 경로 생성 중…','busy');setTimeout(()=>{try{
+      const names=spotNames(),cut=pathsToSvg(boundaryLoops(state.mask,state.w,state.h)),white=pathsToSvg(state.whitePaths);
+      const width=state.w/state.ppm,height=state.h/state.ppm,artUrl=state.artCanvas.toDataURL('image/png');
+      const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${width.toFixed(4)}mm" height="${height.toFixed(4)}mm" viewBox="0 0 ${state.w} ${state.h}"><metadata>SVG spot names are labels only. Use the PDF for real Separation color spaces.</metadata><g id="white-spot" data-spot-name="${escapeHtml(names.white)}"><path d="${white}" fill="#ffffff" fill-rule="evenodd"/></g><image x="0" y="0" width="${state.w}" height="${state.h}" href="${artUrl}"/><g id="cutline-spot" data-spot-name="${escapeHtml(names.cut)}"><path d="${cut}" fill="none" stroke="#f21a9b" stroke-width="${(0.2*state.ppm).toFixed(3)}" stroke-linejoin="round" stroke-linecap="round"/></g></svg>`;
+      download(filenameStem(els.outputName.value)+'.svg',new Blob([svg],{type:'image/svg+xml'}));setStatus('SVG 다운로드 완료 · 스팟 분판은 PDF를 사용하세요.');
+    }catch(e){console.error(e);setStatus('SVG 생성 실패: '+e.message,'error');toast(e.message);}},30);
+  }
+  async function exportPdf(){
+    if(!state.mask||state.dirty)return;
+    try{
+      const names=spotNames(),fileName=filenameStem(els.outputName.value)+'.pdf';if(!state.whitePaths.length)throw new Error('화이트 영역이 없습니다. 작은 조각 제거 기준을 확인해 주세요.');
+      const cutPaths=boundaryLoops(state.mask,state.w,state.h);if(!cutPaths.length)throw new Error('칼선이 비어 있습니다.');
+      setStatus('화이트·칼선 스팟 PDF 생성 중…','busy');els.pdfBtn.disabled=true;await sleep();
+      const blob=await OutlinePDF.create({artwork:state.artCanvas,width:state.w,height:state.h,pixelsPerMm:state.ppm,whitePaths:state.whitePaths,cutPaths,whiteName:names.white,cutName:names.cut});
+      download(fileName,blob);setStatus('PDF 다운로드 완료 · RIP에서 스팟과 인쇄 순서를 확인하세요.');
+    }catch(e){console.error(e);setStatus('PDF 생성 실패: '+e.message,'error');toast(e.message);}
+    finally{els.pdfBtn.disabled=!state.mask||state.dirty;}
+  }
+  function exportPng(){if(!state.mask||state.dirty)return;const c=document.createElement('canvas');c.width=state.w;c.height=state.h;const ctx=c.getContext('2d');ctx.beginPath();appendCanvasPaths(ctx,state.whitePaths);ctx.fillStyle='#fff';ctx.fill('evenodd');ctx.drawImage(state.artCanvas,0,0);const loops=boundaryLoops(state.mask,state.w,state.h);ctx.beginPath();appendCanvasPaths(ctx,loops);ctx.strokeStyle='#f21a9b';ctx.lineWidth=Math.max(2,.2*state.ppm);ctx.lineJoin='round';ctx.stroke();c.toBlob(b=>{if(b)download(filenameStem(els.outputName.value)+'.png',b);else toast('PNG 생성에 실패했습니다.');},'image/png');}
+  function exportJson(){if(!state.mask||state.dirty)return;const current=maskStats();const white=els.whiteSwatch.value==='custom'?els.whiteCustom.value.trim():els.whiteSwatch.value;const report={...state.metrics,source:state.sourceName,actualCutSizeMm:[current.width/state.ppm,current.height/state.ppm],connectedComponents:current.components,internalHoles:current.holes,manualEdits:state.history.length>0,whiteSpotName:white,cutSpotName:els.cutSwatch.value.trim(),clientOnly:true};download(filenameStem(els.outputName.value)+'.json',new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));}
 
-  async function loadFile(file){if(!file)return;if(!/image\/(png|webp)/.test(file.type)){toast('투명 알파가 있는 PNG 또는 WEBP 이미지를 선택하세요.');return;}state.mask=null;state.autoMask=null;state.history=[];state.metrics=null;setEnabled(false);els.processBtn.disabled=true;state.file=file;state.sourceName=file.name;
-    try{const bitmap=await createImageBitmap(file);state.sourceBitmap=bitmap;const tmp=document.createElement('canvas');tmp.width=bitmap.width;tmp.height=bitmap.height;tmp.getContext('2d').drawImage(bitmap,0,0);const data=tmp.getContext('2d').getImageData(0,0,tmp.width,tmp.height).data;let minX=tmp.width,minY=tmp.height,maxX=-1,maxY=-1,hasTransparency=false;for(let y=0;y<tmp.height;y++)for(let x=0;x<tmp.width;x++){const a=data[(y*tmp.width+x)*4+3];if(a<250)hasTransparency=true;if(a>1){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}}
+  async function loadFile(file){if(!file)return;if(state.busy){toast('처리가 끝난 뒤 새 이미지를 선택하세요.');return;}if(!/image\/(png|webp)/.test(file.type)){toast('투명 알파가 있는 PNG 또는 WEBP 이미지를 선택하세요.');return;}const loadVersion=++state.loadVersion;state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.history=[];state.metrics=null;state.dirty=false;setEnabled(false);updateWhiteInfo();els.processBtn.disabled=true;state.file=file;state.sourceName=file.name;if(!state.customFileName)els.outputName.value=filenameStem(file.name.replace(/\.(?:png|webp)$/i,''));
+    try{const bitmap=await createImageBitmap(file);if(loadVersion!==state.loadVersion){bitmap.close();return;}if(state.sourceBitmap)state.sourceBitmap.close();state.sourceBitmap=bitmap;const tmp=document.createElement('canvas');tmp.width=bitmap.width;tmp.height=bitmap.height;tmp.getContext('2d').drawImage(bitmap,0,0);const data=tmp.getContext('2d').getImageData(0,0,tmp.width,tmp.height).data;let minX=tmp.width,minY=tmp.height,maxX=-1,maxY=-1,hasTransparency=false;for(let y=0;y<tmp.height;y++)for(let x=0;x<tmp.width;x++){const a=data[(y*tmp.width+x)*4+3];if(a<250)hasTransparency=true;if(a>1){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}}
       if(maxX<minX)throw new Error('alpha 채널에서 전경을 찾을 수 없습니다.');if(!hasTransparency){state.file=null;els.processBtn.disabled=true;setStatus('투명 알파가 없습니다. 배경이 제거된 PNG/WEBP를 선택하세요.','error');toast('투명 알파가 있는 입력이 필요합니다.');return;}const cw=maxX-minX+1,ch=maxY-minY+1;const crop=document.createElement('canvas');crop.width=cw;crop.height=ch;crop.getContext('2d').drawImage(tmp,minX,minY,cw,ch,0,0,cw,ch);state.croppedCanvas=crop;
       els.fileMeta.classList.remove('hidden');els.fileMeta.innerHTML=`<b>${escapeHtml(file.name)}</b><br>${bitmap.width} × ${bitmap.height}px · alpha bbox ${cw} × ${ch}px`;
       els.processBtn.disabled=false;setStatus('이미지 준비 완료 · 설정을 확인하고 파이프라인을 실행하세요.');toast('이미지를 브라우저 메모리에 불러왔습니다.');
       // Fast preview before processing.
       els.canvasWrap.classList.remove('empty-state');els.canvasWrap.classList.add('has-image');const ctx=els.canvas.getContext('2d');els.canvas.width=bitmap.width;els.canvas.height=bitmap.height;ctx.drawImage(bitmap,0,0);els.canvas.style.display='block';
-    }catch(e){setStatus('이미지 읽기 실패: '+e.message,'error');}
+    }catch(e){if(loadVersion===state.loadVersion)setStatus('이미지 읽기 실패: '+e.message,'error');}
   }
   function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
-  els.fileInput.addEventListener('change',e=>loadFile(e.target.files?.[0]));
+  els.fileInput.addEventListener('change',e=>{const file=e.target.files?.[0];e.target.value='';loadFile(file);});
   els.processBtn.addEventListener('click',processPipeline);
   els.brushTool.addEventListener('click',()=>setTool('brush'));els.eraserTool.addEventListener('click',()=>setTool('eraser'));
   els.brushSize.addEventListener('input',()=>{els.brushSizeText.value=Number(els.brushSize.value).toFixed(1).replace(/\.0$/,'')+' mm';render();});
   els.undoBtn.addEventListener('click',undo);els.resetEditsBtn.addEventListener('click',resetEdits);els.fitBtn.addEventListener('click',()=>{els.canvas.style.maxWidth='100%';els.canvas.style.maxHeight='100%';});
-  els.svgBtn.addEventListener('click',exportSvg);els.pngBtn.addEventListener('click',exportPng);els.jsonBtn.addEventListener('click',exportJson);
+  els.pdfBtn.addEventListener('click',exportPdf);els.svgBtn.addEventListener('click',exportSvg);els.pngBtn.addEventListener('click',exportPng);els.jsonBtn.addEventListener('click',exportJson);
+  els.whiteSwatch.addEventListener('change',()=>{const custom=els.whiteSwatch.value==='custom';els.whiteCustomWrap.classList.toggle('hidden',!custom);if(custom)els.whiteCustom.focus();});
+  els.whitePreview.addEventListener('change',render);els.outputName.addEventListener('input',()=>{state.customFileName=true;});
+  ['offsetInput','heightInput','webInput','gapInput','scaffoldInput','tabWidthInput','tabDepthInput','taperInput','tipRadiusInput','speckInput','alphaInput'].forEach(id=>$(id).addEventListener('input',markPipelineDirty));
   els.canvas.addEventListener('pointerdown',pointerDown);els.canvas.addEventListener('pointermove',pointerMove);els.canvas.addEventListener('pointerup',pointerUp);els.canvas.addEventListener('pointercancel',pointerUp);els.canvas.addEventListener('pointerleave',()=>{if(!state.painting){state.cursor=null;render();}});
   window.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();undo();}});
   for(const ev of ['dragenter','dragover'])els.dropZone.addEventListener(ev,e=>{e.preventDefault();els.dropZone.classList.add('dragover');});
   for(const ev of ['dragleave','drop'])els.dropZone.addEventListener(ev,e=>{e.preventDefault();els.dropZone.classList.remove('dragover');});
-  els.dropZone.addEventListener('drop',e=>loadFile(e.dataTransfer.files?.[0]));els.canvasWrap.addEventListener('dragover',e=>{e.preventDefault();els.canvasWrap.classList.add('dragover');});els.canvasWrap.addEventListener('dragleave',()=>els.canvasWrap.classList.remove('dragover'));els.canvasWrap.addEventListener('drop',e=>{e.preventDefault();els.canvasWrap.classList.remove('dragover');loadFile(e.dataTransfer.files?.[0]);});
+  els.dropZone.addEventListener('drop',e=>loadFile(e.dataTransfer.files?.[0]));
   $('brushSizeText').value='10 mm';
 })();

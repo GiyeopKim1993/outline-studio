@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Outline Studio · 로컬 절단 외곽선 도구</title>
   <link rel="stylesheet" href="styles.css" />
+  <script defer src="vendor/clipper.js"></script>
+  <script defer src="pdf.js"></script>
   <script defer src="app.js"></script>
 </head>
 <body>
@@ -44,10 +46,35 @@
         </ol>
       </section>
 
+      <section class="card spot-card">
+        <div class="section-title"><span class="step">03</span><div><h2>화이트 · 인쇄 스팟</h2><p>별색 분판 및 칼선 설정</p></div></div>
+        <div class="choke-note"><span class="choke-dot"></span><span><strong>알파 기준 0.15 mm 안쪽 침식</strong><small>작은 아일랜드 제거 후 벡터화 · 투명 홀 유지</small></span></div>
+        <label class="field-label" for="whiteSwatch">화이트 스와치</label>
+        <select id="whiteSwatch" class="field-control">
+          <option value="rdg_white">rdg_white</option>
+          <option value="white">white</option>
+          <option value="spot_0">spot_0</option>
+          <option value="custom">직접 입력</option>
+        </select>
+        <div id="whiteCustomWrap" class="hidden">
+          <label class="field-label" for="whiteCustom">화이트 스와치 이름</label>
+          <input id="whiteCustom" class="field-control" type="text" maxlength="127" placeholder="예: White_Ink" autocomplete="off" />
+        </div>
+        <label class="field-label" for="cutSwatch">칼선 스와치 이름</label>
+        <input id="cutSwatch" class="field-control" type="text" maxlength="127" value="CutContour" autocomplete="off" />
+        <label class="check-row" for="whitePreview"><input id="whitePreview" type="checkbox" checked /> 편집 화면에 화이트 영역 표시</label>
+        <p id="whiteInfo" class="micro-note" aria-live="polite">작은 조각 제거 기준과 알파 임계값은 파이프라인 설정을 사용합니다.</p>
+        <p class="micro-note">스팟 이름은 장비 설정과 대소문자까지 일치시켜 주세요. 영문·숫자·일반 기호만 사용할 수 있습니다.</p>
+      </section>
+
       <section class="card export-card">
-        <div class="section-title"><span class="step">04</span><div><h2>내보내기</h2><p>수정된 외곽 기준</p></div></div>
-        <div class="export-buttons"><button id="svgBtn" disabled>SVG 외곽</button><button id="pngBtn" disabled>PNG 미리보기</button><button id="jsonBtn" disabled>검사 JSON</button></div>
-        <p class="micro-note">벡터 출력은 실제 mm 크기로 저장됩니다. 브러시 편집 후에도 다시 검사할 수 있습니다.</p>
+        <div class="section-title"><span class="step">04</span><div><h2>내보내기</h2><p>수정된 외곽과 화이트 기준</p></div></div>
+        <label class="field-label" for="outputName">저장 파일명 <span>(확장자 제외)</span></label>
+        <input id="outputName" class="field-control filename-control" type="text" value="outline-studio" maxlength="120" autocomplete="off" />
+        <div class="export-buttons"><button id="pdfBtn" class="export-primary" disabled>PDF · 인쇄 스팟</button><button id="svgBtn" disabled>SVG 벡터</button><button id="pngBtn" disabled>PNG 미리보기</button><button id="jsonBtn" disabled>검사 JSON</button></div>
+        <p class="micro-note">PDF에는 화이트와 칼선이 별색 분판으로 저장됩니다. SVG·PNG는 스팟 분판이 아닌 미리보기입니다.</p>
+        <p class="micro-note">일반 PDF 뷰어에서는 화이트가 그림을 가릴 수 있습니다. Acrobat 또는 RIP의 오버프린트·분판 미리보기로 확인하세요.</p>
+        <p class="micro-note">원본 색상은 RGB로 유지됩니다. 실제 출력 전 RIP에서 스팟 이름과 화이트 인쇄 순서를 확인하세요.</p>
       </section>
       <footer class="side-foot">No accounts · No network calls · Local file processing</footer>
     </aside>
@@ -63,10 +90,10 @@
           <button id="eraserTool" class="tool-button" disabled><span class="tool-dot eraser-dot"></span>지우개</button>
         </div>
         <div class="brush-size"><label for="brushSize">도구 폭</label><input id="brushSize" type="range" min="1" max="20" step="0.5" value="10" disabled/><output id="brushSizeText">10 mm</output></div>
-        <div class="color-key"><span><i class="key-outline"></i>절단 외곽</span><span><i class="key-added"></i>재료 영역</span></div>
+        <div class="color-key"><span><i class="key-outline"></i>절단 외곽</span><span><i class="key-added"></i>재료 영역</span><span><i class="key-white"></i>화이트 스팟</span></div>
       </div>
       <div id="canvasWrap" class="canvas-wrap empty-state">
-        <div id="emptyMessage" class="empty-message"><div class="empty-art">⌁</div><h2>투명 PNG를 여기로 가져오세요</h2><p>알파 기반 파이프라인을 실행한 뒤 화면에서 직접 수정할 수 있습니다.</p><label class="secondary-button" for="fileInput">파일 선택</label></div>
+        <div id="emptyMessage" class="empty-message"><div class="empty-art">⌁</div><h2>이미지를 선택해 시작하세요</h2><p>이미지 입력 영역에서 투명 PNG 또는 WEBP를 선택한 뒤 파이프라인을 실행하세요.</p></div>
         <canvas id="editorCanvas" aria-label="외곽선 편집 캔버스"></canvas>
       </div>
       <div class="metrics-bar">
