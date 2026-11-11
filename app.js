@@ -9,7 +9,10 @@
     whiteSwatch:$('whiteSwatch'),whiteCustom:$('whiteCustom'),whiteCustomWrap:$('whiteCustomWrap'),cutSwatch:$('cutSwatch'),
     whitePreview:$('whitePreview'),whiteInfo:$('whiteInfo'),outputName:$('outputName'),
     scaffoldWidth:$('scaffoldWidth'),scaffoldMeta:$('scaffoldMeta'),tabWarning:$('tabWarning'),
-    metricStatus:$('metricStatus'),metricSize:$('metricSize'),metricComponents:$('metricComponents'),metricHoles:$('metricHoles'),metricWebs:$('metricWebs')
+    metricStatus:$('metricStatus'),metricSize:$('metricSize'),metricComponents:$('metricComponents'),metricHoles:$('metricHoles'),metricWebs:$('metricWebs'),
+    stepper:$('stepper'),workspace:$('workspace'),fileMetaSide:$('fileMetaSide'),
+    nextFrom1:$('nextFrom1'),nextFrom2:$('nextFrom2'),nextFrom3:$('nextFrom3'),nextFrom4:$('nextFrom4'),
+    backTo1:$('backTo1'),backTo2:$('backTo2'),backTo3:$('backTo3'),backTo4:$('backTo4')
   };
   const state={file:null,sourceBitmap:null,artCanvas:null,overlayCanvas:null,w:0,h:0,ppm:0,artMask:null,whitePaths:[],whiteAreaMm2:0,autoMask:null,mask:null,tool:'brush',painting:false,lastPoint:null,history:[],metrics:null,sourceName:'',cursor:null,dirty:false,customFileName:false,busy:false,loadVersion:0};
   const DPI=300, PAD_MM=10, MIN_CORE_MM2=25, WHITE_CHOKE_MM=0.15;
@@ -28,6 +31,60 @@
   function setEnabled(on){[els.brushTool,els.eraserTool,els.brushSize,els.undoBtn,els.resetEditsBtn,els.fitBtn,els.pdfBtn,els.svgBtn,els.pngBtn,els.jsonBtn].forEach(x=>x.disabled=!on);}
   function sleep(){return new Promise(r=>setTimeout(r,20));}
   function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+
+  // ---- 단계형 작업 화면: 각 단계에서 필요한 UI만 노출합니다. ----
+  const STEP_INFO={1:'이미지 입력',2:'규칙 설정',3:'외곽 편집',4:'화이트·스팟',5:'내보내기'};
+  const wizard={step:1,unlocked:1};
+  function unlock(step){wizard.unlocked=Math.max(wizard.unlocked,Math.min(5,step));syncWizard();}
+  function canEnter(step){
+    if(step===1)return true;
+    if(step===2)return !!state.file;
+    return !!state.mask;
+  }
+  function stepNote(n){
+    if(n===1)return state.file?'파일 준비됨':'투명 PNG';
+    if(n===2)return state.mask?'재계산 가능':'mm 단위';
+    if(n===3)return state.metrics?`${state.metrics.scaffoldShape==='triangle'?'삼각형':'사각형'} 적용`:'브러시 · 지우개';
+    if(n===4)return state.whitePaths&&state.whitePaths.length?'화이트 준비됨':'별색 분판';
+    return state.mask?'내보낼 수 있음':'PDF · SVG · PNG';
+  }
+  function setStep(step,{silent=false}={}){
+    step=Math.max(1,Math.min(5,step));
+    if(!canEnter(step)||step>wizard.unlocked){if(!silent)toast('이전 단계를 먼저 완료해 주세요.');return;}
+    wizard.step=step;document.body.dataset.step=String(step);
+    syncWizard();
+    const slot=document.querySelector(`.step-panel[data-panel="${step}"] .workspace-slot`);
+    if(slot&&els.workspace.parentElement!==slot)slot.appendChild(els.workspace);
+    if(step===3||step===4||step===5)scheduleRender();
+    if(!silent)window.scrollTo({top:0,behavior:'smooth'});
+  }
+  function syncWizard(){
+    document.querySelectorAll('.stepper-item').forEach(btn=>{
+      const n=Number(btn.dataset.step),enter=canEnter(n)&&n<=wizard.unlocked;
+      let st='idle';
+      if(n===wizard.step)st='active';else if(!enter)st='locked';else if(n<wizard.step||(n===1&&state.file)||(n===2&&state.mask))st='done';
+      btn.dataset.state=st;btn.disabled=st==='locked';
+      btn.setAttribute('aria-current',n===wizard.step?'step':'false');
+      btn.title=st==='locked'?'이전 단계를 완료하면 열립니다.':STEP_INFO[n];
+      const note=$('stepNote'+n);if(note)note.textContent=stepNote(n);
+    });
+    document.querySelectorAll('.step-panel').forEach(panel=>{panel.hidden=Number(panel.dataset.panel)!==wizard.step;});
+    els.nextFrom1.disabled=!state.file;
+    els.nextFrom2.disabled=!state.mask;
+    els.nextFrom2.title=state.mask?'':'규칙 설정 단계에서 파이프라인을 먼저 실행하세요.';
+    els.nextFrom3.disabled=!state.mask;
+    els.nextFrom4.disabled=!state.mask;
+    els.processBtn.innerHTML=state.mask?'<span>↻</span> 다시 실행':'<span>▶</span> 파이프라인 실행';
+  }
+  let autoRunTimer=0;
+  function scheduleAutoRun(){
+    clearTimeout(autoRunTimer);
+    autoRunTimer=setTimeout(async()=>{
+      if(state.busy){scheduleAutoRun();return;}
+      if(!state.autoMask||!state.file)return;
+      await processPipeline({auto:true});
+    },500);
+  }
 
   // Exact Euclidean distance transform (Felzenszwalb-Huttenlocher), separable and linear-time.
   function edt1d(f,n,d,v,z){
@@ -125,7 +182,7 @@
   function findCrossings(mask,w,h,x){const out=[];x=Math.round(x);if(x<1||x>=w-1)return out;for(let y=1;y<h-1;y++){if(mask[y*w+x]!==mask[(y-1)*w+x])out.push([x,y]);}return out;}
   function localJunctionBlend(mask,w,h,ppm,cx,top,bottom,scaffoldWidth){const crossings=[...findCrossings(mask,w,h,cx-scaffoldWidth*ppm/2),...findCrossings(mask,w,h,cx+scaffoldWidth*ppm/2)];if(!crossings.length)return {mask,junctions:0};const smooth=closing(mask,w,h,1.5*ppm),out=mask.slice(),r=5*ppm,r2=r*r;for(const [x,y] of crossings){const x0=Math.max(0,Math.floor(x-r)),x1=Math.min(w-1,Math.ceil(x+r)),y0=Math.max(0,Math.floor(y-r)),y1=Math.min(h-1,Math.ceil(y+r));for(let yy=y0;yy<=y1;yy++)for(let xx=x0;xx<=x1;xx++){const dx=xx-x,dy=yy-y;if(dx*dx+dy*dy<=r2)out[yy*w+xx]=smooth[yy*w+xx];}}return {mask:out,junctions:crossings.length};}
 
-  async function processPipeline(){
+  async function processPipeline(opts={}){
     if(!state.file)return;const s=settings();const activeHeight=s.targetHeight-2*s.offset-s.tabDepth;
     const settingIds=['offsetInput','heightInput','webInput','gapInput','tabWidthInput','tabDepthInput','taperInput','tipRadiusInput','speckInput','alphaInput'];
     const invalid=settingIds.map($).find(el=>el.value===''||!el.checkValidity());
@@ -192,8 +249,16 @@
       state.overlayCanvas=document.createElement('canvas');state.overlayCanvas.width=w;state.overlayCanvas.height=h;
       state.dirty=JSON.stringify(s)!==JSON.stringify(settings());
       setStage(3);render();refreshMetrics();setEnabled(true);els.undoBtn.disabled=true;els.processBtn.disabled=false;updateWhiteInfo();updateScaffoldInfo(scaffold,s.tabWidth,keptCells,droppedCells);
-      if(state.dirty){markPipelineDirty();}else if(!state.whitePaths.length){setStatus('화이트 영역이 없습니다. 제거 기준과 침식 후 형상을 확인하세요.','error');}
-      else{setStatus('처리 완료 · 브러시/지우개로 직접 수정할 수 있습니다.');}toast('파이프라인 완료');
+      if(state.file&&els.fileMetaSide)els.fileMetaSide.innerHTML=els.fileMeta.innerHTML;
+      // 결과가 있으면 편집·스팟·내보내기 단계가 모두 열립니다.
+      unlock(5);
+      if(state.dirty){markPipelineDirty();}
+      else if(!state.whitePaths.length){setStatus('화이트 영역이 없습니다. 제거 기준과 침식 후 형상을 확인하세요.','error');}
+      else if(opts.auto){setStatus('설정 변경으로 자동 재계산했습니다 · 브러시 수동 편집은 초기화됩니다.');}
+      else{setStatus('처리 완료 · 브러시/지우개로 직접 수정할 수 있습니다.');}
+      if(opts.auto)toast('설정 변경 · 자동 재계산 완료');else toast('파이프라인 완료');
+      syncWizard();
+      if(!opts.auto&&wizard.step<=2)setStep(3);
     }catch(err){console.error(err);resetScaffoldInfo('계산 실패');setStatus('오류: '+(err.message||err),'error');els.processBtn.disabled=false;setEnabled(!!state.mask);}
     finally{state.busy=false;els.fileInput.disabled=false;}
   }
@@ -206,7 +271,7 @@
     const id=ctx.createImageData(state.w,state.h),d=id.data,w=state.w,h=state.h,m=state.mask;
     for(let y=0;y<h;y++)for(let x=0;x<w;x++){const i=y*w+x;if(!m[i])continue;const p=i*4;const edge=(x===0||x===w-1||y===0||y===h-1||!m[i-1]||!m[i+1]||!m[i-w]||!m[i+w]);if(edge){d[p]=242;d[p+1]=26;d[p+2]=155;d[p+3]=255;}else{d[p]=36;d[p+1]=178;d[p+2]=139;d[p+3]=42;}}
     state.overlayCanvas.getContext('2d').putImageData(id,0,0);ctx.drawImage(state.overlayCanvas,0,0);
-    if(els.whitePreview.checked&&state.whitePaths.length){
+    if((els.whitePreview.checked||wizard.step===4)&&state.whitePaths.length){
       ctx.beginPath();appendCanvasPaths(ctx,state.whitePaths);ctx.fillStyle='rgba(40,184,222,.15)';ctx.fill('evenodd');
       ctx.strokeStyle='rgba(18,161,204,.9)';ctx.lineWidth=Math.max(1,1.5*state.w/Math.max(canvas.clientWidth,1));ctx.stroke();
     }
@@ -220,8 +285,8 @@
     }}
   function eventPoint(e){const r=els.canvas.getBoundingClientRect();return {x:(e.clientX-r.left)*state.w/r.width,y:(e.clientY-r.top)*state.h/r.height};}
   function saveHistory(){state.history.push(state.mask.slice());if(state.history.length>12)state.history.shift();els.undoBtn.disabled=false;}
-  function pointerDown(e){if(!state.mask||e.button!==0)return;e.preventDefault();els.canvas.setPointerCapture(e.pointerId);saveHistory();state.painting=true;state.lastPoint=eventPoint(e);drawBrushSegment(state.lastPoint,state.lastPoint,state.tool);render();}
-  function pointerMove(e){if(!state.mask)return;const p=eventPoint(e);state.cursor=p;if(state.painting){drawBrushSegment(state.lastPoint,p,state.tool);state.lastPoint=p;scheduleRender();}else scheduleRender();}
+  function pointerDown(e){if(!state.mask||e.button!==0||wizard.step!==3)return;e.preventDefault();els.canvas.setPointerCapture(e.pointerId);saveHistory();state.painting=true;state.lastPoint=eventPoint(e);drawBrushSegment(state.lastPoint,state.lastPoint,state.tool);render();}
+  function pointerMove(e){if(!state.mask||wizard.step!==3)return;const p=eventPoint(e);state.cursor=p;if(state.painting){drawBrushSegment(state.lastPoint,p,state.tool);state.lastPoint=p;scheduleRender();}else scheduleRender();}
   function pointerUp(){if(!state.painting)return;state.painting=false;state.lastPoint=null;render();refreshMetrics();setStatus('수정됨 · 검사 지표를 확인하세요.');}
   function undo(){if(!state.history.length)return;state.mask=state.history.pop();render();refreshMetrics();els.undoBtn.disabled=!state.history.length;toast('한 단계 되돌렸습니다.');}
   function resetEdits(){if(!state.autoMask)return;state.mask=state.autoMask.slice();state.history=[];render();refreshMetrics();els.undoBtn.disabled=true;setStatus('자동 파이프라인 결과로 되돌렸습니다.');}
@@ -285,8 +350,10 @@
     else{els.tabWarning.textContent='';els.tabWarning.classList.add('hidden');}
   }
   function markPipelineDirty(){
-    if(!state.mask)return;state.dirty=true;resetScaffoldInfo('다시 실행 필요');[els.pdfBtn,els.svgBtn,els.pngBtn,els.jsonBtn].forEach(x=>x.disabled=true);
-    setStatus('파이프라인 설정이 변경되었습니다. 다시 실행한 뒤 내보내세요.','error');
+    if(!state.autoMask){resetScaffoldInfo();return;}
+    state.dirty=true;resetScaffoldInfo('다시 계산 중…');
+    setStatus('설정이 변경되었습니다 · 자동으로 다시 계산합니다.','busy');
+    scheduleAutoRun();
   }
   function spotNames(){
     const white=(els.whiteSwatch.value==='custom'?els.whiteCustom.value:els.whiteSwatch.value).trim(),cut=els.cutSwatch.value.trim();
@@ -326,17 +393,28 @@
   function exportPng(){if(!state.mask||state.dirty)return;const c=document.createElement('canvas');c.width=state.w;c.height=state.h;const ctx=c.getContext('2d');ctx.beginPath();appendCanvasPaths(ctx,state.whitePaths);ctx.fillStyle='#fff';ctx.fill('evenodd');ctx.drawImage(state.artCanvas,0,0);const loops=boundaryLoops(state.mask,state.w,state.h);ctx.beginPath();appendCanvasPaths(ctx,loops);ctx.strokeStyle='#f21a9b';ctx.lineWidth=Math.max(2,.2*state.ppm);ctx.lineJoin='round';ctx.stroke();c.toBlob(b=>{if(b)download(filenameStem(els.outputName.value)+'.png',b);else toast('PNG 생성에 실패했습니다.');},'image/png');}
   function exportJson(){if(!state.mask||state.dirty)return;const current=maskStats();const white=els.whiteSwatch.value==='custom'?els.whiteCustom.value.trim():els.whiteSwatch.value;const report={...state.metrics,source:state.sourceName,actualCutSizeMm:[current.width/state.ppm,current.height/state.ppm],connectedComponents:current.components,internalHoles:current.holes,manualEdits:state.history.length>0,whiteSpotName:white,cutSpotName:els.cutSwatch.value.trim(),clientOnly:true};download(filenameStem(els.outputName.value)+'.json',new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));}
 
-  async function loadFile(file){if(!file)return;if(state.busy){toast('처리가 끝난 뒤 새 이미지를 선택하세요.');return;}if(!/image\/(png|webp)/.test(file.type)){toast('투명 알파가 있는 PNG 또는 WEBP 이미지를 선택하세요.');return;}const loadVersion=++state.loadVersion;state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.history=[];state.metrics=null;state.dirty=false;setEnabled(false);updateWhiteInfo();resetScaffoldInfo();els.processBtn.disabled=true;state.file=file;state.sourceName=file.name;if(!state.customFileName)els.outputName.value=filenameStem(file.name.replace(/\.(?:png|webp)$/i,''));
+  async function loadFile(file){if(!file)return;setStep(1,{silent:true});if(state.busy){toast('처리가 끝난 뒤 새 이미지를 선택하세요.');return;}if(!/image\/(png|webp)/.test(file.type)){toast('투명 알파가 있는 PNG 또는 WEBP 이미지를 선택하세요.');return;}const loadVersion=++state.loadVersion;state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.history=[];state.metrics=null;state.dirty=false;setEnabled(false);updateWhiteInfo();resetScaffoldInfo();els.processBtn.disabled=true;state.file=file;state.sourceName=file.name;if(!state.customFileName)els.outputName.value=filenameStem(file.name.replace(/\.(?:png|webp)$/i,''));
     try{const bitmap=await createImageBitmap(file);if(loadVersion!==state.loadVersion){bitmap.close();return;}if(state.sourceBitmap)state.sourceBitmap.close();state.sourceBitmap=bitmap;const tmp=document.createElement('canvas');tmp.width=bitmap.width;tmp.height=bitmap.height;tmp.getContext('2d').drawImage(bitmap,0,0);const data=tmp.getContext('2d').getImageData(0,0,tmp.width,tmp.height).data;let minX=tmp.width,minY=tmp.height,maxX=-1,maxY=-1,hasTransparency=false;for(let y=0;y<tmp.height;y++)for(let x=0;x<tmp.width;x++){const a=data[(y*tmp.width+x)*4+3];if(a<250)hasTransparency=true;if(a>1){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}}
       if(maxX<minX)throw new Error('alpha 채널에서 전경을 찾을 수 없습니다.');if(!hasTransparency){state.file=null;els.processBtn.disabled=true;setStatus('투명 알파가 없습니다. 배경이 제거된 PNG/WEBP를 선택하세요.','error');toast('투명 알파가 있는 입력이 필요합니다.');return;}const cw=maxX-minX+1,ch=maxY-minY+1;const crop=document.createElement('canvas');crop.width=cw;crop.height=ch;crop.getContext('2d').drawImage(tmp,minX,minY,cw,ch,0,0,cw,ch);state.croppedCanvas=crop;
       els.fileMeta.classList.remove('hidden');els.fileMeta.innerHTML=`<b>${escapeHtml(file.name)}</b><br>${bitmap.width} × ${bitmap.height}px · alpha bbox ${cw} × ${ch}px`;
       els.processBtn.disabled=false;setStatus('이미지 준비 완료 · 설정을 확인하고 파이프라인을 실행하세요.');toast('이미지를 브라우저 메모리에 불러왔습니다.');
+      if(els.fileMetaSide)els.fileMetaSide.innerHTML=els.fileMeta.innerHTML;
+      unlock(2);setStep(2,{silent:true});
       // Fast preview before processing.
       els.canvasWrap.classList.remove('empty-state');els.canvasWrap.classList.add('has-image');const ctx=els.canvas.getContext('2d');els.canvas.width=bitmap.width;els.canvas.height=bitmap.height;ctx.drawImage(bitmap,0,0);els.canvas.style.display='block';
     }catch(e){if(loadVersion===state.loadVersion)setStatus('이미지 읽기 실패: '+e.message,'error');}
   }
   function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
+  document.querySelectorAll('.stepper-item').forEach(btn=>btn.addEventListener('click',()=>setStep(Number(btn.dataset.step))));
+  els.nextFrom1.addEventListener('click',()=>setStep(2));
+  els.nextFrom2.addEventListener('click',()=>{if(state.mask)setStep(3);else if(state.file)processPipeline();});
+  els.nextFrom3.addEventListener('click',()=>setStep(4));
+  els.nextFrom4.addEventListener('click',()=>setStep(5));
+  els.backTo1.addEventListener('click',()=>setStep(1));
+  els.backTo2.addEventListener('click',()=>setStep(2));
+  els.backTo3.addEventListener('click',()=>setStep(3));
+  els.backTo4.addEventListener('click',()=>setStep(4));
   els.fileInput.addEventListener('change',e=>{const file=e.target.files?.[0];e.target.value='';loadFile(file);});
   els.processBtn.addEventListener('click',processPipeline);
   els.brushTool.addEventListener('click',()=>setTool('brush'));els.eraserTool.addEventListener('click',()=>setTool('eraser'));
@@ -347,9 +425,12 @@
   els.whitePreview.addEventListener('change',render);els.outputName.addEventListener('input',()=>{state.customFileName=true;});
   ['offsetInput','heightInput','webInput','gapInput','tabWidthInput','tabDepthInput','taperInput','tipRadiusInput','speckInput','alphaInput'].forEach(id=>$(id).addEventListener('input',markPipelineDirty));
   els.canvas.addEventListener('pointerdown',pointerDown);els.canvas.addEventListener('pointermove',pointerMove);els.canvas.addEventListener('pointerup',pointerUp);els.canvas.addEventListener('pointercancel',pointerUp);els.canvas.addEventListener('pointerleave',()=>{if(!state.painting){state.cursor=null;render();}});
+  // 캔버스는 숨겨진 단계에서도 크기가 0이 되므로, 다시 보일 때와 창 크기 변경 시 다시 그립니다.
+  window.addEventListener('resize',()=>{if(state.mask)scheduleRender();});
   window.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();undo();}});
   for(const ev of ['dragenter','dragover'])els.dropZone.addEventListener(ev,e=>{e.preventDefault();els.dropZone.classList.add('dragover');});
   for(const ev of ['dragleave','drop'])els.dropZone.addEventListener(ev,e=>{e.preventDefault();els.dropZone.classList.remove('dragover');});
   els.dropZone.addEventListener('drop',e=>loadFile(e.dataTransfer.files?.[0]));
+  syncWizard();
   $('brushSizeText').value='10 mm';
 })();
