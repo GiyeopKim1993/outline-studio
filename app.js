@@ -137,22 +137,27 @@
     try{
       const nominalPpm=DPI/25.4,targetPx=Math.round(activeHeight*nominalPpm),crop=state.croppedCanvas;
       const scaledW=Math.max(1,Math.round(crop.width*targetPx/crop.height));const scaled=document.createElement('canvas');scaled.width=scaledW;scaled.height=targetPx;scaled.getContext('2d').drawImage(crop,0,0,scaledW,targetPx);
-      const scaledData=scaled.getContext('2d').getImageData(0,0,scaledW,targetPx).data;let minX=scaledW,minY=targetPx,maxX=-1,maxY=-1;
-      for(let y=0;y<targetPx;y++)for(let x=0;x<scaledW;x++)if(scaledData[(y*scaledW+x)*4+3]>s.alpha){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}
+      const scaledData=scaled.getContext('2d').getImageData(0,0,scaledW,targetPx).data,scaledMask=new Uint8Array(scaledW*targetPx);let minX=scaledW,minY=targetPx,maxX=-1,maxY=-1;
+      for(let y=0;y<targetPx;y++)for(let x=0;x<scaledW;x++)if(scaledData[(y*scaledW+x)*4+3]>s.alpha){scaledMask[y*scaledW+x]=1;if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}
       if(maxY<minY)throw new Error('알파 임계값보다 높은 전경 픽셀이 없습니다.');
       const activePxH=maxY-minY+1,ppm=activePxH/activeHeight;
+      const scaledCleaned=removeSmall(scaledMask,scaledW,targetPx,ppm,s.speck);
+      if(!scaledCleaned.kept)throw new Error('작은 조각 제거 후 남은 알파 영역이 없습니다. 제거 기준을 낮춰 주세요.');
+      const cleanStats=stats(scaledCleaned.mask,scaledW,targetPx);
       // Leave enough room even when a fixed tab is wider than a narrow body,
       // or when an asymmetric silhouette puts its center near an image edge.
       const possibleOutlineWidth=(maxX-minX+1)/ppm+2*(s.offset+s.webWidth/2)+4/ppm;
       const possibleScaffold=ScaffoldRules.chooseWidth(possibleOutlineWidth).scaffoldWidthMm;
       const safety=s.offset+s.webWidth/2+1;
       const padX=Math.ceil(Math.max(PAD_MM,Math.max(s.tabWidth,possibleScaffold)/2+safety)*ppm);
-      const padY=Math.ceil(Math.max(PAD_MM,s.offset+s.webWidth/2+s.tabDepth+1)*ppm);
+      // A removed island can make the retained product much shorter than the
+      // original crop. Reserve room ABOVE its bottom for the whole triangle.
+      const triangleAboveCrop=Math.max(0,25*Math.sqrt(3)-(cleanStats.maxY+1)/ppm);
+      const padY=Math.ceil(Math.max(PAD_MM,s.offset+s.webWidth/2+s.tabDepth+1,triangleAboveCrop+safety)*ppm);
       const w=scaledW+padX*2,h=targetPx+padY*2;
       const art=document.createElement('canvas');art.width=w;art.height=h;art.getContext('2d').drawImage(scaled,padX,padY);state.artCanvas=art;state.w=w;state.h=h;state.ppm=ppm;
-      const rgba=art.getContext('2d').getImageData(0,0,w,h).data,mask=new Uint8Array(w*h);for(let i=0;i<mask.length;i++)mask[i]=rgba[i*4+3]>s.alpha?1:0;
-      const cleaned=removeSmall(mask,w,h,ppm,s.speck);
-      if(!cleaned.kept)throw new Error('작은 조각 제거 후 남은 알파 영역이 없습니다. 제거 기준을 낮춰 주세요.');
+      const cleaned={mask:new Uint8Array(w*h),removed:scaledCleaned.removed,kept:scaledCleaned.kept};
+      for(let y=0;y<targetPx;y++)cleaned.mask.set(scaledCleaned.mask.subarray(y*scaledW,(y+1)*scaledW),(y+padY)*w+padX);
       // Unlike the cut silhouette, the white spot retains transparent holes.
       setStatus('화이트 0.15mm 안쪽 오프셋 및 벡터화 중…','busy');await sleep();
       state.whitePaths=makeWhitePaths(cleaned.mask,w,h,ppm,WHITE_CHOKE_MM);
@@ -166,9 +171,12 @@
       // W is the full bounding width AFTER offset and neck reinforcement but
       // BEFORE the scaffold Boolean, gap-fill and tab are applied.
       const scaffold=ScaffoldRules.chooseWidth(baseStats.width/ppm),scaffoldWidth=scaffold.scaffoldWidthMm;
-      const rect=roundedRectMask(w,h,baseStats.cx,baseStats.minY,baseStats.maxY+1,scaffoldWidth*ppm,3*ppm);
+      const scaffoldMask=scaffold.shape==='triangle'
+        ?ScaffoldRules.roundedTriangleMask(w,h,baseStats.cx,baseStats.maxY+1,ppm,scaffold.nominalDimensionMm,scaffold.cornerRadiusMm)
+        :roundedRectMask(w,h,baseStats.cx,baseStats.minY,baseStats.maxY+1,scaffoldWidth*ppm,scaffold.cornerRadiusMm*ppm);
+      const scaffoldStats=stats(scaffoldMask,w,h);
       const upperEnd=baseStats.minY+(baseStats.height/3);
-      const selection=ScaffoldRules.selectFragments(outline,rect,w,h,upperEnd);
+      const selection=ScaffoldRules.selectFragments(outline,scaffoldMask,w,h,upperEnd);
       const scaffoldUnion=selection.mask,keptCells=selection.kept,droppedCells=selection.dropped;
       const gapRadius=(s.gap/2)*ppm;let closed=scaffoldUnion;if(s.gap>0)closed=closing(scaffoldUnion,w,h,gapRadius);
       let gapPixels=0;for(let i=0;i<closed.length;i++)if(closed[i]&&!scaffoldUnion[i])gapPixels++;
@@ -179,11 +187,11 @@
       state.metrics={source:state.sourceName,activeArtworkHeightMm:activeHeight,pixelsPerMm:ppm,globalOuterOffsetMm:s.offset,targetOverallCutHeightMm:s.targetHeight,
         actualCutSizeMm:null,componentsRemoved:cleaned.removed,componentsKept:cleaned.kept,initialHolesFilled:filled.holes,whiteChokeMm:WHITE_CHOKE_MM,whiteAreaMm2:state.whiteAreaMm2,whiteAlphaThreshold:s.alpha,whiteMinIslandAreaMm2:s.speck,whiteHolesPreserved:true,neckCoreCount:neck.cores,
         detectedWebCount:neck.webs.length,detectedWebs:neck.webs.map(x=>({...x,fromPx:x.fromPx.map(v=>v/ppm),toPx:x.toPx.map(v=>v/ppm)})),neckWebAddedAreaMm2:webAdded,
-        outlineWidthBeforeScaffoldMm:scaffold.outlineWidthMm,scaffoldWidthMm:scaffoldWidth,scaffoldTier:scaffold.tier,tabWiderThanScaffold:s.tabWidth>scaffoldWidth,tabWiderThanOutline:s.tabWidth>scaffold.outlineWidthMm,deletedUpperThirdCells:droppedCells,retainedCells:keptCells,gapFillThresholdMm:s.gap,gapFillAreaMm2:gapPixels/(ppm*ppm),
+        outlineWidthBeforeScaffoldMm:scaffold.outlineWidthMm,outlineHeightBeforeScaffoldMm:baseStats.height/ppm,scaffoldWidthMm:scaffoldWidth,scaffoldHeightMm:scaffold.triangle?scaffold.triangle.roundedHeightMm:baseStats.height/ppm,scaffoldMaskSizeMm:[scaffoldStats.width/ppm,scaffoldStats.height/ppm],scaffoldNominalDimensionMm:scaffold.nominalDimensionMm,scaffoldCornerRadiusMm:scaffold.cornerRadiusMm,scaffoldTriangle:scaffold.triangle,scaffoldShape:scaffold.shape,scaffoldTier:scaffold.tier,tabWiderThanScaffold:s.tabWidth>scaffoldWidth,tabWiderThanOutline:s.tabWidth>scaffold.outlineWidthMm,deletedUpperThirdCells:droppedCells,retainedCells:keptCells,gapFillThresholdMm:s.gap,gapFillAreaMm2:gapPixels/(ppm*ppm),
         junctionBlendCount:blend.junctions,tabWidthMm:s.tabWidth,tabDepthMm:s.tabDepth,tabTaperMm:s.taper,tabTipRadiusMm:s.tipR,finalHolesFilled:finalFilled.holes};
       state.overlayCanvas=document.createElement('canvas');state.overlayCanvas.width=w;state.overlayCanvas.height=h;
       state.dirty=JSON.stringify(s)!==JSON.stringify(settings());
-      setStage(3);render();refreshMetrics();setEnabled(true);els.undoBtn.disabled=true;els.processBtn.disabled=false;updateWhiteInfo();updateScaffoldInfo(scaffold,s.tabWidth);
+      setStage(3);render();refreshMetrics();setEnabled(true);els.undoBtn.disabled=true;els.processBtn.disabled=false;updateWhiteInfo();updateScaffoldInfo(scaffold,s.tabWidth,keptCells,droppedCells);
       if(state.dirty){markPipelineDirty();}else if(!state.whitePaths.length){setStatus('화이트 영역이 없습니다. 제거 기준과 침식 후 형상을 확인하세요.','error');}
       else{setStatus('처리 완료 · 브러시/지우개로 직접 수정할 수 있습니다.');}toast('파이프라인 완료');
     }catch(err){console.error(err);resetScaffoldInfo('계산 실패');setStatus('오류: '+(err.message||err),'error');els.processBtn.disabled=false;setEnabled(!!state.mask);}
@@ -191,7 +199,7 @@
   }
 
   function maskStats(){if(!state.mask)return null;const s=stats(state.mask,state.w,state.h),cc=components(state.mask,state.w,state.h,0,false);const noHoles=fillHoles(state.mask,state.w,state.h);let holes=0;for(let i=0;i<state.mask.length;i++)if(noHoles.mask[i]&&!state.mask[i])holes++;return {...s,components:cc.items.length,holes};}
-  function refreshMetrics(){if(!state.mask)return;const m=maskStats(),ppm=state.ppm,actualH=m.height/ppm,actualW=m.width/ppm;state.metrics.actualCutSizeMm=[actualW,actualH];const pass=m.components===1&&m.holes===0&&!state.metrics.tabWiderThanScaffold;els.metricStatus.textContent=pass?'PASS':'검토 필요';els.metricStatus.style.color=pass?'#15976f':'#d28524';els.metricStatus.title=state.metrics.tabWiderThanScaffold?'탭이 스캐폴드보다 넓습니다. 형상을 확인하세요.':'';els.metricSize.textContent=`${actualW.toFixed(1)} × ${actualH.toFixed(1)} mm`;els.metricComponents.textContent=String(m.components);els.metricHoles.textContent=String(m.holes);els.metricWebs.textContent=String(state.metrics.detectedWebCount||0);}
+  function refreshMetrics(){if(!state.mask)return;const m=maskStats(),ppm=state.ppm,actualH=m.height/ppm,actualW=m.width/ppm;state.metrics.actualCutSizeMm=[actualW,actualH];const noFragments=state.metrics.retainedCells===0;const pass=m.components===1&&m.holes===0&&!state.metrics.tabWiderThanScaffold&&!noFragments;els.metricStatus.textContent=pass?'PASS':'검토 필요';els.metricStatus.style.color=pass?'#15976f':'#d28524';els.metricStatus.title=noFragments?'합칠 스캐폴드 조각이 없습니다.':state.metrics.tabWiderThanScaffold?'탭이 스캐폴드보다 넓습니다. 형상을 확인하세요.':'';els.metricSize.textContent=`${actualW.toFixed(1)} × ${actualH.toFixed(1)} mm`;els.metricComponents.textContent=String(m.components);els.metricHoles.textContent=String(m.holes);els.metricWebs.textContent=String(state.metrics.detectedWebCount||0);}
   let renderQueued=false;
   function scheduleRender(){if(renderQueued)return;renderQueued=true;requestAnimationFrame(()=>{renderQueued=false;render();});}
   function render(){if(!state.mask||!state.artCanvas)return;const canvas=els.canvas,ctx=canvas.getContext('2d');canvas.width=state.w;canvas.height=state.h;ctx.clearRect(0,0,state.w,state.h);ctx.drawImage(state.artCanvas,0,0);
@@ -258,15 +266,23 @@
     els.scaffoldWidth.textContent=label;els.scaffoldMeta.textContent='오프셋·보강 후 아웃라인 폭에 따라 결정';
     els.tabWarning.textContent='';els.tabWarning.classList.add('hidden');
   }
-  function updateScaffoldInfo(scaffold,tabWidth){
-    const f=n=>Number(n.toFixed(2)).toString();
-    els.scaffoldWidth.textContent=f(scaffold.scaffoldWidthMm)+' mm';
-    els.scaffoldMeta.textContent=`아웃라인 ${f(scaffold.outlineWidthMm)} mm · ${scaffold.tier} mm 구간`;
+  function updateScaffoldInfo(scaffold,tabWidth,keptCells,droppedCells){
+    const f=n=>Number(n.toFixed(2)).toString(),triangle=scaffold.shape==='triangle';
+    els.scaffoldWidth.textContent=triangle?'기준 변 50 mm':'폭 50 mm';
+    els.scaffoldMeta.textContent=`아웃라인 ${f(scaffold.outlineWidthMm)} mm · ${triangle?'둥근 정삼각형':'둥근 사각형'} · R1`;
+    const warnings=[];
+    if(triangle)warnings.push(`삼각형은 둥글리기 전 한 변 50mm, R1 적용 후 최대 폭 약 ${f(scaffold.scaffoldWidthMm)}mm입니다.`);
+    if(triangle&&scaffold.scaffoldWidthMm>scaffold.outlineWidthMm)warnings.push('스캐폴드가 본품보다 넓습니다.');
+    const shapeName=triangle?'삼각형':'사각형';
+    if(keptCells===0&&droppedCells>0)warnings.push(`상단 1/3 규칙에 따라 ${shapeName} 조각이 남지 않아 스캐폴드가 추가되지 않았습니다.`);
+    else if(keptCells===0)warnings.push(`${shapeName}이 본품 안에 포함되어 별도로 합칠 바깥 조각이 없습니다.`);
+    else if(droppedCells>0)warnings.push(`상단 1/3에 닿는 조각 ${droppedCells}개를 제외하고 ${keptCells}개를 합쳤습니다.`);
     if(tabWidth>scaffold.scaffoldWidthMm){
       const extra=tabWidth>scaffold.outlineWidthMm?' 본품 아웃라인보다도 넓습니다.':'';
-      els.tabWarning.textContent=`탭 폭 ${f(tabWidth)} mm는 스캐폴드보다 넓습니다.${extra} 탭 폭은 변경하지 않았으니 형상을 확인하세요.`;
-      els.tabWarning.classList.remove('hidden');
-    }else{els.tabWarning.textContent='';els.tabWarning.classList.add('hidden');}
+      warnings.push(`탭 폭 ${f(tabWidth)}mm가 스캐폴드 외형 폭 ${f(scaffold.scaffoldWidthMm)}mm보다 넓습니다.${extra} 탭 폭은 변경하지 않았습니다.`);
+    }
+    if(warnings.length){els.tabWarning.textContent=warnings.join(' ');els.tabWarning.classList.remove('hidden');}
+    else{els.tabWarning.textContent='';els.tabWarning.classList.add('hidden');}
   }
   function markPipelineDirty(){
     if(!state.mask)return;state.dirty=true;resetScaffoldInfo('다시 실행 필요');[els.pdfBtn,els.svgBtn,els.pngBtn,els.jsonBtn].forEach(x=>x.disabled=true);

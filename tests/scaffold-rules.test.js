@@ -1,19 +1,49 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { chooseWidth, selectFragments } = require('../scaffold-rules.js');
+const { chooseWidth, roundedTriangleDimensions, roundedTriangleMask, selectFragments } = require('../scaffold-rules.js');
 
-test('approved width tiers, including their exact boundaries', () => {
-  for (const [w, expected] of [
-    [10, 6], [49.99, 49.99 * 0.6], [50, 30], [99.99, 30],
-    [100, 50], [149.99, 50], [150, 70], [199.99, 70], [200, 90], [450, 90]
-  ]) {
-    const result = chooseWidth(w);
-    assert.ok(Math.abs(result.scaffoldWidthMm - expected) < 1e-9, `${w} mm`);
-    assert.ok(result.scaffoldWidthMm < w, `scaffold must be narrower than ${w}`);
+test('shape switches at the exact 50mm pre-scaffold outline width', () => {
+  for (const [w, shape] of [[0.01,'triangle'],[33,'triangle'],[49.999999,'triangle'],[50,'rounded_rectangle'],[80,'rounded_rectangle'],[200,'rounded_rectangle']]) {
+    const result=chooseWidth(w);assert.equal(result.nominalDimensionMm,50);assert.equal(result.shape,shape);assert.equal(result.cornerRadiusMm,1);
+    if(shape==='triangle'){
+      assert.equal(result.triangle.virtualSideMm,50);
+      assert.ok(Math.abs(result.scaffoldWidthMm - 48.53589838486224)<1e-10);
+    }else{assert.equal(result.scaffoldWidthMm,50);assert.equal(result.triangle,null);}
   }
-  for (let w = 0.01; w <= 500; w += 0.137) assert.ok(chooseWidth(w).scaffoldWidthMm < w);
-  for (const value of [0, -1, Infinity, NaN]) assert.throws(() => chooseWidth(value));
+  for(const w of [0,-1,NaN,Infinity])assert.throws(()=>chooseWidth(w));
+});
+
+test('rounded equilateral triangle uses a virtual 50mm side and true R1 fillets', () => {
+  const d=roundedTriangleDimensions();
+  assert.equal(d.virtualSideMm,50);assert.equal(d.cornerRadiusMm,1);
+  assert.ok(Math.abs(d.virtualHeightMm - 25*Math.sqrt(3))<1e-10);
+  assert.ok(Math.abs(d.roundedWidthMm - 48.53589838486224)<1e-10);
+  assert.ok(Math.abs(d.roundedHeightMm - 42.30127018922193)<1e-10);
+  assert.ok(Math.abs(d.straightSideMm - 46.53589838486224)<1e-10);
+  assert.equal(roundedTriangleDimensions(50,0).roundedWidthMm,50);
+  for(const [side,r] of [[50,-1],[0,1],[50,15],[NaN,1],[50,NaN]])assert.throws(()=>roundedTriangleDimensions(side,r));
+});
+
+test('the rounded mask is point-up, base-aligned, symmetric, and has R1 corners', () => {
+  const w=620,h=620,cx=310,bottom=550,ppm=10;
+  const mask=roundedTriangleMask(w,h,cx,bottom,ppm);
+  const sharp=roundedTriangleMask(w,h,cx,bottom,ppm,50,0);
+  let minX=w,maxX=-1,minY=h,maxY=-1,area=0,sharpArea=0;
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+    const i=y*w+x;if(sharp[i])sharpArea++;
+    assert.equal(mask[i],mask[y*w+(2*cx-1-x)],`symmetry at ${x},${y}`);
+    if(mask[i]){area++;minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);assert.equal(sharp[i],1,'fillet cannot extend outside the virtual triangle');}
+  }
+  assert.ok(area>0&&area<sharpArea);
+  assert.ok(Math.abs((maxX-minX+1)/ppm-48.535898)<.11);
+  assert.ok(Math.abs((maxY-minY+1)/ppm-42.301270)<.11);
+  assert.equal(maxY,bottom-1,'base stays at the requested bottom');
+  const top=bottom-25*Math.sqrt(3)*ppm;
+  assert.equal(mask[Math.floor(top+.5*ppm)*w+cx],0,'sharp apex is rounded away');
+  assert.equal(mask[Math.floor(top+1.1*ppm)*w+cx],1,'material starts at the rounded apex');
+  assert.equal(mask[(bottom-1)*w+Math.floor(cx-24.5*ppm)],0,'virtual lower corner is rounded away');
+  assert.equal(mask[(bottom-1)*w+cx],1,'middle of the base is present');
 });
 
 test('the upper scaffold-only fragment is removed and the lower fragment is merged', () => {

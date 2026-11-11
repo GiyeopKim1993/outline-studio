@@ -37,15 +37,14 @@
           <div class="scaffold-head"><span>중앙 스캐폴드 <i>자동</i></span><output id="scaffoldWidth" aria-live="polite">처리 후 계산</output></div>
           <p id="scaffoldMeta">오프셋·보강 후 아웃라인 폭에 따라 결정</p>
           <p id="tabWarning" class="tab-warning hidden" role="status"></p>
-          <details class="scaffold-tiers"><summary>자동 폭 단계 보기</summary>
-            <table><thead><tr><th>아웃라인 폭 W</th><th>스캐폴드 폭</th></tr></thead><tbody>
-              <tr><td>W &lt; 50 mm</td><td>W × 60%</td></tr>
-              <tr><td>50 ≤ W &lt; 100 mm</td><td>30 mm</td></tr>
-              <tr><td>100 ≤ W &lt; 150 mm</td><td>50 mm</td></tr>
-              <tr><td>150 ≤ W &lt; 200 mm</td><td>70 mm</td></tr>
-              <tr><td>W ≥ 200 mm</td><td>90 mm</td></tr>
+          <details class="scaffold-tiers"><summary>자동 형상 규칙 보기</summary>
+            <table><thead><tr><th>아웃라인 폭 W</th><th>스캐폴드</th></tr></thead><tbody>
+              <tr><td>W &lt; 50 mm</td><td>둥근 정삼각형 · 기준 변 50 mm</td></tr>
+              <tr><td>W ≥ 50 mm</td><td>둥근 사각형 · 폭 50 mm</td></tr>
             </tbody></table>
-            <p>본품 실루엣은 유지하고, 상단 1/3에 닿지 않는 스캐폴드 조각만 합칩니다.</p>
+            <p>W는 오프셋·목 보강 후, 스캐폴드를 합치기 전 본품 아웃라인 전체 폭입니다. 두 형상의 모서리 반경은 R1mm입니다.</p>
+            <p>정삼각형의 50mm는 둥글리기 전 변이며, 둥글린 후 외형 폭은 약 48.54mm입니다. 꼭짓점을 위로, 밑변을 본품 하단에 맞춥니다. 사각형 높이는 본품 아웃라인 전체 높이입니다.</p>
+            <p>본품 실루엣은 유지하고 상단 1/3에 닿지 않는 스캐폴드 조각만 합칩니다. 최종 칼선 치수는 조각 선별·후처리와 래스터 격자에 따라 달라질 수 있습니다.</p>
           </details>
         </div>
         <details class="advanced"><summary>센터탭 상세값</summary>
