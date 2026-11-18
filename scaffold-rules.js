@@ -6,7 +6,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, () => {
   'use strict';
   const SQRT3 = Math.sqrt(3);
-  const NOMINAL_MM = 50;
+  const NOMINAL_MM = 47;
   // Shared R1 radius for both scaffold shapes.
   const CORNER_RADIUS_MM = 1;
 
