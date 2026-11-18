@@ -320,11 +320,16 @@
     return Array.from(name||'outline-studio').slice(0,120).join('');
   }
   function download(name,blob){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1200);}
+  // Keep the padded editing workspace intact, but trim saved artwork to the
+  // final cutline bounds (plus one raster pixel so the 0.2mm stroke is not clipped).
+  function exportCrop(){let minX=state.w,minY=state.h,maxX=-1,maxY=-1;for(let y=0;y<state.h;y++)for(let x=0;x<state.w;x++)if(state.mask[y*state.w+x]){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}if(maxX<minX)throw new Error('칼선 경계가 비어 있습니다.');const left=Math.max(0,minX-1),top=Math.max(0,minY-1),right=Math.min(state.w,maxX+2),bottom=Math.min(state.h,maxY+2);return {left,top,width:right-left,height:bottom-top};}
+  function cropCanvas(source,b){const c=document.createElement('canvas');c.width=b.width;c.height=b.height;c.getContext('2d').drawImage(source,b.left,b.top,b.width,b.height,0,0,b.width,b.height);return c;}
+  function shiftPaths(paths,b){return paths.map(loop=>loop.map(p=>[p[0]-b.left,p[1]-b.top]));}
   function exportSvg(){
     if(!state.mask||state.dirty)return;setStatus('SVG 벡터 경로 생성 중…','busy');setTimeout(()=>{try{
-      const names=spotNames(),cut=pathsToSvg(boundaryLoops(state.mask,state.w,state.h)),white=pathsToSvg(state.whitePaths);
-      const width=state.w/state.ppm,height=state.h/state.ppm,artUrl=state.artCanvas.toDataURL('image/png');
-      const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${width.toFixed(4)}mm" height="${height.toFixed(4)}mm" viewBox="0 0 ${state.w} ${state.h}"><metadata>SVG spot names are labels only. Use the PDF for real Separation color spaces.</metadata><g id="white-spot" data-spot-name="${escapeHtml(names.white)}"><path d="${white}" fill="#ffffff" fill-rule="evenodd"/></g><image x="0" y="0" width="${state.w}" height="${state.h}" href="${artUrl}"/><g id="cutline-spot" data-spot-name="${escapeHtml(names.cut)}"><path d="${cut}" fill="none" stroke="#f21a9b" stroke-width="${(0.2*state.ppm).toFixed(3)}" stroke-linejoin="round" stroke-linecap="round"/></g></svg>`;
+      const names=spotNames(),box=exportCrop(),cut=pathsToSvg(shiftPaths(boundaryLoops(state.mask,state.w,state.h),box)),white=pathsToSvg(shiftPaths(state.whitePaths,box));
+      const width=box.width/state.ppm,height=box.height/state.ppm,art=cropCanvas(state.artCanvas,box),artUrl=art.toDataURL('image/png');
+      const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${width.toFixed(4)}mm" height="${height.toFixed(4)}mm" viewBox="0 0 ${box.width} ${box.height}"><metadata>SVG spot names are labels only. Use the PDF for real Separation color spaces.</metadata><g id="white-spot" data-spot-name="${escapeHtml(names.white)}"><path d="${white}" fill="#ffffff" fill-rule="evenodd"/></g><image x="0" y="0" width="${box.width}" height="${box.height}" href="${artUrl}"/><g id="cutline-spot" data-spot-name="${escapeHtml(names.cut)}"><path d="${cut}" fill="none" stroke="#f21a9b" stroke-width="${(0.2*state.ppm).toFixed(3)}" stroke-linejoin="round" stroke-linecap="round"/></g></svg>`;
       download(filenameStem(els.outputName.value)+'.svg',new Blob([svg],{type:'image/svg+xml'}));setStatus('SVG 다운로드 완료 · 스팟 분판은 PDF를 사용하세요.');
     }catch(e){console.error(e);setStatus('SVG 생성 실패: '+e.message,'error');toast(e.message);}},30);
   }
@@ -332,14 +337,15 @@
     if(!state.mask||state.dirty)return;
     try{
       const names=spotNames(),fileName=filenameStem(els.outputName.value)+'.pdf';if(!state.whitePaths.length)throw new Error('화이트 영역이 없습니다. 작은 조각 제거 기준을 확인해 주세요.');
-      const cutPaths=boundaryLoops(state.mask,state.w,state.h);if(!cutPaths.length)throw new Error('칼선이 비어 있습니다.');
+      const box=exportCrop(),cutPaths=shiftPaths(boundaryLoops(state.mask,state.w,state.h),box),whitePaths=shiftPaths(state.whitePaths,box);if(!cutPaths.length)throw new Error('칼선이 비어 있습니다.');
+      const artwork=cropCanvas(state.artCanvas,box);
       setStatus('화이트·칼선 스팟 PDF 생성 중…','busy');els.pdfBtn.disabled=true;await sleep();
-      const blob=await OutlinePDF.create({artwork:state.artCanvas,width:state.w,height:state.h,pixelsPerMm:state.ppm,whitePaths:state.whitePaths,cutPaths,whiteName:names.white,cutName:names.cut});
+      const blob=await OutlinePDF.create({artwork,width:box.width,height:box.height,pixelsPerMm:state.ppm,whitePaths,cutPaths,whiteName:names.white,cutName:names.cut});
       download(fileName,blob);setStatus('PDF 다운로드 완료 · RIP에서 스팟과 인쇄 순서를 확인하세요.');
     }catch(e){console.error(e);setStatus('PDF 생성 실패: '+e.message,'error');toast(e.message);}
     finally{els.pdfBtn.disabled=!state.mask||state.dirty;}
   }
-  function exportPng(){if(!state.mask||state.dirty)return;const c=document.createElement('canvas');c.width=state.w;c.height=state.h;const ctx=c.getContext('2d');ctx.beginPath();appendCanvasPaths(ctx,state.whitePaths);ctx.fillStyle='#fff';ctx.fill('evenodd');ctx.drawImage(state.artCanvas,0,0);const loops=boundaryLoops(state.mask,state.w,state.h);ctx.beginPath();appendCanvasPaths(ctx,loops);ctx.strokeStyle='#f21a9b';ctx.lineWidth=Math.max(2,.2*state.ppm);ctx.lineJoin='round';ctx.stroke();c.toBlob(b=>{if(b)download(filenameStem(els.outputName.value)+'.png',b);else toast('PNG 생성에 실패했습니다.');},'image/png');}
+  function exportPng(){if(!state.mask||state.dirty)return;const box=exportCrop(),c=document.createElement('canvas');c.width=box.width;c.height=box.height;const ctx=c.getContext('2d');ctx.beginPath();appendCanvasPaths(ctx,shiftPaths(state.whitePaths,box));ctx.fillStyle='#fff';ctx.fill('evenodd');ctx.drawImage(state.artCanvas,box.left,box.top,box.width,box.height,0,0,box.width,box.height);const loops=shiftPaths(boundaryLoops(state.mask,state.w,state.h),box);ctx.beginPath();appendCanvasPaths(ctx,loops);ctx.strokeStyle='#f21a9b';ctx.lineWidth=Math.max(2,.2*state.ppm);ctx.lineJoin='round';ctx.stroke();c.toBlob(b=>{if(b)download(filenameStem(els.outputName.value)+'.png',b);else toast('PNG 생성에 실패했습니다.');},'image/png');}
   function exportJson(){if(!state.mask||state.dirty)return;const current=maskStats();const white=els.whiteSwatch.value==='custom'?els.whiteCustom.value.trim():els.whiteSwatch.value;const report={...state.metrics,source:state.sourceName,actualCutSizeMm:[current.width/state.ppm,current.height/state.ppm],connectedComponents:current.components,internalHoles:current.holes,manualEdits:state.history.length>0,whiteSpotName:white,cutSpotName:els.cutSwatch.value.trim(),clientOnly:true};download(filenameStem(els.outputName.value)+'.json',new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));}
 
   async function loadFile(file){if(!file)return;if(state.busy){toast('처리가 끝난 뒤 새 이미지를 선택하세요.');return;}setFlowStage(1);$('workflowStep2').disabled=true;if(!/image\/(png|webp)/.test(file.type)){toast('투명 알파가 있는 PNG 또는 WEBP 이미지를 선택하세요.');return;}const loadVersion=++state.loadVersion;state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.history=[];state.metrics=null;state.dirty=false;setEnabled(false);updateWhiteInfo();resetScaffoldInfo();els.processBtn.disabled=true;state.file=file;state.sourceName=file.name;if(!state.customFileName)els.outputName.value=filenameStem(file.name.replace(/\.(?:png|webp)$/i,''));
