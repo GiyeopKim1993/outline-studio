@@ -21,14 +21,16 @@
       <button id="workflowStep1" class="workflow-step active" aria-current="step"><span>1</span> 업로드 · 세부설정</button>
       <button id="workflowStep2" class="workflow-step" disabled><span>2</span> 미리보기 · 편집 · 내보내기</button>
     </nav>
+    <div id="batchQueueBar" class="batch-queue-bar hidden" aria-live="polite"></div>
     <aside class="sidebar">
       <section class="card">
         <div class="section-title"><span class="step">01</span><div><h2>이미지 입력</h2><p>투명 배경 PNG 권장</p></div></div>
         <label id="dropZone" class="drop-zone" for="fileInput">
-          <input id="fileInput" type="file" accept="image/png,image/webp" />
+          <input id="fileInput" type="file" accept="image/png,image/webp" multiple />
           <span class="upload-icon">↑</span><strong>이미지를 끌어놓거나 클릭</strong><small>처리는 전부 이 브라우저 안에서 수행</small>
         </label>
         <div id="fileMeta" class="file-meta hidden"></div>
+        <button id="batchProcessBtn" class="batch-process-button hidden" disabled>전체 이미지 처리</button>
       </section>
 
       <section class="card">
@@ -43,11 +45,11 @@
           <p id="tabWarning" class="tab-warning hidden" role="status"></p>
           <details class="scaffold-tiers"><summary>자동 형상 규칙 보기</summary>
             <table><thead><tr><th>아웃라인 폭 W</th><th>스캐폴드</th></tr></thead><tbody>
-              <tr><td>W &lt; 50 mm</td><td>둥근 정삼각형 · 기준 변 50 mm</td></tr>
-              <tr><td>W ≥ 50 mm</td><td>둥근 사각형 · 폭 50 mm</td></tr>
+              <tr><td>W &lt; 50 mm</td><td>둥근 정삼각형 · 기준 변 47 mm</td></tr>
+              <tr><td>W ≥ 50 mm</td><td>둥근 사각형 · 폭 47 mm</td></tr>
             </tbody></table>
             <p>W는 오프셋·목 보강 후, 스캐폴드를 합치기 전 본품 아웃라인 전체 폭입니다. 두 형상의 모서리 반경은 R1mm입니다.</p>
-            <p>정삼각형의 50mm는 둥글리기 전 변이며, 둥글린 후 외형 폭은 약 48.54mm입니다. 꼭짓점을 위로, 밑변을 본품 하단에 맞춥니다. 사각형 높이는 본품 아웃라인 전체 높이입니다.</p>
+            <p>정삼각형의 기준 변 47mm는 둥글리기 전 변이며, 둥글린 후 외형 폭은 약 45.54mm입니다. 꼭짓점을 위로, 밑변을 본품 하단에 맞춥니다. 사각형 높이는 본품 아웃라인 전체 높이입니다.</p>
             <p>본품 실루엣은 유지하고 상단 1/3에 닿지 않는 스캐폴드 조각만 합칩니다. 최종 칼선 치수는 조각 선별·후처리와 래스터 격자에 따라 달라질 수 있습니다.</p>
           </details>
         </div>

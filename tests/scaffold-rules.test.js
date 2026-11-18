@@ -3,8 +3,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { chooseWidth, roundedTriangleDimensions, roundedTriangleMask, selectFragments } = require('../scaffold-rules.js');
 
-test('shape switches at the exact 47mm pre-scaffold outline width', () => {
-  for (const [w, shape] of [[0.01,'triangle'],[33,'triangle'],[46.999999,'triangle'],[47,'rounded_rectangle'],[80,'rounded_rectangle'],[200,'rounded_rectangle']]) {
+test('shape switches at the exact 50mm pre-scaffold outline width', () => {
+  for (const [w, shape] of [[0.01,'triangle'],[33,'triangle'],[49.999999,'triangle'],[50,'rounded_rectangle'],[80,'rounded_rectangle'],[200,'rounded_rectangle']]) {
     const result=chooseWidth(w);assert.equal(result.nominalDimensionMm,47);assert.equal(result.shape,shape);assert.equal(result.cornerRadiusMm,1);
     if(shape==='triangle'){
       assert.equal(result.triangle.virtualSideMm,47);

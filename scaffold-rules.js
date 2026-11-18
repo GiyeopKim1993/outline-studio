@@ -6,14 +6,14 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, () => {
   'use strict';
   const SQRT3 = Math.sqrt(3);
-  const NOMINAL_MM = 47;
+  const SWITCH_WIDTH_MM = 50;
+  const SCAFFOLD_DIMENSION_MM = 47;
   // Shared R1 radius for both scaffold shapes.
   const CORNER_RADIUS_MM = 1;
 
-  // The 50 mm side is measured between the *virtual sharp* vertices. Rounding
-  // cuts each 60-degree corner back; it cannot preserve both that side length
-  // and a physical outside width of 50 mm for a positive corner radius.
-  function roundedTriangleDimensions(side = NOMINAL_MM, radius = CORNER_RADIUS_MM) {
+  // The triangle virtual side and rounded-rectangle width use a 47 mm
+  // nominal dimension. Shape switching remains based on W = 50 mm.
+  function roundedTriangleDimensions(side = SCAFFOLD_DIMENSION_MM, radius = CORNER_RADIUS_MM) {
     side = Number(side); radius = Number(radius);
     if (!Number.isFinite(side) || side <= 0 || !Number.isFinite(radius) || radius < 0 || radius > side * SQRT3 / 6) {
       throw new Error('삼각형 변 길이 또는 둥글림 반경이 올바르지 않습니다.');
@@ -33,16 +33,16 @@
   function chooseWidth(outlineWidthMm) {
     const w = Number(outlineWidthMm);
     if (!Number.isFinite(w) || w <= 0) throw new Error('아웃라인 폭을 계산할 수 없습니다.');
-    const isTriangle = w < NOMINAL_MM;
+    const isTriangle = w < SWITCH_WIDTH_MM;
     const triangle = isTriangle ? roundedTriangleDimensions() : null;
     return {
       outlineWidthMm: w,
       shape: isTriangle ? 'triangle' : 'rounded_rectangle',
       tier: isTriangle ? 'W < 50' : 'W ≥ 50',
-      nominalDimensionMm: NOMINAL_MM,
+      nominalDimensionMm: SCAFFOLD_DIMENSION_MM,
       cornerRadiusMm: CORNER_RADIUS_MM,
       // Continuous, before rasterization or the Boolean fragment selection.
-      scaffoldWidthMm: triangle ? triangle.roundedWidthMm : NOMINAL_MM,
+      scaffoldWidthMm: triangle ? triangle.roundedWidthMm : SCAFFOLD_DIMENSION_MM,
       triangle
     };
   }
@@ -50,7 +50,7 @@
   // A filleted equilateral triangle is the Minkowski sum of its inset triangle
   // (the three arc centres) and a disk of the fillet radius. Pixel centres are
   // tested analytically; the virtual base is at bottom, and the point is up.
-  function roundedTriangleMask(w, h, cx, bottom, ppm, sideMm = NOMINAL_MM, radiusMm = CORNER_RADIUS_MM) {
+  function roundedTriangleMask(w, h, cx, bottom, ppm, sideMm = SCAFFOLD_DIMENSION_MM, radiusMm = CORNER_RADIUS_MM) {
     if (!Number.isInteger(w) || !Number.isInteger(h) || w <= 0 || h <= 0 ||
         !Number.isFinite(cx) || !Number.isFinite(bottom) || !Number.isFinite(ppm) || ppm <= 0) {
       throw new Error('삼각형 마스크 입력이 올바르지 않습니다.');
