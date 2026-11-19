@@ -16,6 +16,15 @@ function item(name, wMm, hMm, opts = {}) {
   return { name, width: w, height: h, pixelsPerMm: ppm, widthMm: wMm, heightMm: hMm, cutPaths: cut, whitePaths: [rect] };
 }
 
+const segPointDist = (p, a, b) => {
+  const vx = b[0] - a[0], vy = b[1] - a[1];
+  const L = vx * vx + vy * vy;
+  let t = L ? ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / L : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p[0] - (a[0] + t * vx), p[1] - (a[1] + t * vy));
+};
+const tf = (pts, m) => pts.map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
+
 function byName(result, name) {
   return result.placements.filter((p) => p.name === name);
 }
@@ -133,15 +142,28 @@ test('placementMatrix maps artwork pixels onto the sheet for every rotation', ()
   }
 });
 
-test('items are packed against their real outline and keep the 0.25mm gap', () => {
-  // L-shaped items: the packer must reason about the outline, not the box, and
-  // must still leave exactly the configured clearance on the real cut lines.
+test('two L shapes interlock instead of being packed as boxes', () => {
+  // The whole point of holding the real outline: two identical Ls share a
+  // corner, so they must sit closer than their bounding boxes ever could.
   const ell = [[0, 0], [60, 0], [60, 20], [20, 20], [20, 80], [0, 80]];
   const r = packNesting([item('L1', 60, 80, { cutPaths: [ell] }), item('L2', 60, 80, { cutPaths: [ell] })]);
   assert.equal(r.placements.length, 2);
   const [a, b] = r.placements;
-  const gap = b.xMm - (a.xMm + a.widthMm);
-  assert.ok(Math.abs(gap - 0.25) < 0.06, `neighbours keep a 0.25mm gap on the outline, got ${gap.toFixed(3)}`);
+  const boxGap = b.xMm - (a.xMm + a.widthMm);
+  assert.ok(boxGap < 0, `boxes must overlap for an interlocked pair, got ${boxGap.toFixed(3)}mm`);
+  // ...and the real outlines must still keep the 0.25mm clearance.
+  const shift = (p) => {
+    const s = p.outlineShift || [0, 0];
+    return tf(ell.map(([x, y]) => [x + s[0], y + s[1]]), p.matrix);
+  };
+  const A = shift(a), B = shift(b);
+  let nearest = Infinity;
+  for (const [P, Q] of [[A, B], [B, A]]) {
+    for (const q of Q) {
+      for (let i = 0; i < P.length; i++) nearest = Math.min(nearest, segPointDist(q, P[i], P[(i + 1) % P.length]));
+    }
+  }
+  assert.ok(nearest >= 0.24, `cut lines keep the 0.25mm gap, got ${nearest.toFixed(3)}mm`);
 });
 
 test('rejects empty or invalid input', () => {

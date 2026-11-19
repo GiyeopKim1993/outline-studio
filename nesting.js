@@ -165,11 +165,60 @@ function pointInPolygon(pt, poly) {
 
 // Do two normalised polygons overlap when the right one is shifted by dx?
 function polygonPairOverlap(A, B, dx) {
+  // Bounding-box rejection first: at most offsets a neighbouring shape only
+  // overlaps along a narrow band, so this skips almost every segment pair.
+  let aMinX = Infinity, aMaxX = -Infinity, aMinY = Infinity, aMaxY = -Infinity;
+  for (const [x, y] of A) {
+    if (x < aMinX) aMinX = x; if (x > aMaxX) aMaxX = x;
+    if (y < aMinY) aMinY = y; if (y > aMaxY) aMaxY = y;
+  }
+  let bMinX = Infinity, bMaxX = -Infinity, bMinY = Infinity, bMaxY = -Infinity;
+  for (const [x, y] of B) {
+    if (x < bMinX) bMinX = x; if (x > bMaxX) bMaxX = x;
+    if (y < bMinY) bMinY = y; if (y > bMaxY) bMaxY = y;
+  }
+  if (aMaxX <= bMinX + dx || bMaxX + dx <= aMinX) return false;
+  if (aMaxY <= bMinY || bMaxY <= aMinY) return false;
+
+  // Bucket B's segments into vertical slabs so each A segment only tests the
+  // slab ranges it can actually reach. Slab size is tied to the shape, so the
+  // bucketing cost stays proportional to the outline.
+  const spanX = Math.max(aMaxX, bMaxX + dx) - Math.min(aMinX, bMinX + dx);
+  const slabCount = Math.max(4, Math.min(64, Math.ceil(spanX / 2)));
+  const slabW = (spanX || 1) / slabCount;
+  const originX = Math.min(aMinX, bMinX + dx);
+  const slabs = new Array(slabCount);
+  for (let j = 0; j < B.length; j++) {
+    const b1 = B[j], b2 = B[(j + 1) % B.length];
+    const x1 = b1[0] + dx, x2 = b2[0] + dx;
+    let lo = Math.floor((Math.min(x1, x2) - originX) / slabW);
+    let hi = Math.floor((Math.max(x1, x2) - originX) / slabW);
+    if (lo < 0) lo = 0; if (hi >= slabCount) hi = slabCount - 1;
+    for (let sIdx = lo; sIdx <= hi; sIdx++) (slabs[sIdx] || (slabs[sIdx] = [])).push(j);
+  }
+
+  const bYMin = B.map(([x, y]) => y);
+  const bXMin = B.map(([x]) => x);
   for (let i = 0; i < A.length; i++) {
     const a1 = A[i], a2 = A[(i + 1) % A.length];
-    for (let j = 0; j < B.length; j++) {
-      const b1 = [B[j][0] + dx, B[j][1]], b2 = [B[(j + 1) % B.length][0] + dx, B[(j + 1) % B.length][1]];
-      if (segmentIntersect(a1, a2, b1, b2)) return true;
+    let lo = Math.floor((Math.min(a1[0], a2[0]) - originX) / slabW);
+    let hi = Math.floor((Math.max(a1[0], a2[0]) - originX) / slabW);
+    if (lo < 0) lo = 0; if (hi >= slabCount) hi = slabCount - 1;
+    const aYLo = Math.min(a1[1], a2[1]), aYHi = Math.max(a1[1], a2[1]);
+    for (let sIdx = lo; sIdx <= hi; sIdx++) {
+      const bucket = slabs[sIdx];
+      if (!bucket) continue;
+      for (let k = 0; k < bucket.length; k++) {
+        const j = bucket[k];
+        if (bXMin[j] === undefined) { bXMin[j] = B[j][0]; bYMin[j] = B[j][1]; }
+        const b1 = B[j], b2 = B[(j + 1) % B.length];
+        // Cheap y rejection before the segment test.
+        if (Math.max(b1[1], b2[1]) <= aYLo || Math.min(b1[1], b2[1]) >= aYHi) {
+          // Still could be equal-height; fall through only on strict separation.
+          if (Math.max(b1[1], b2[1]) <= aYLo || Math.min(b1[1], b2[1]) >= aYHi) continue;
+        }
+        if (segmentIntersect(a1, a2, [b1[0] + dx, b1[1]], [b2[0] + dx, b2[1]])) return true;
+      }
     }
   }
   if (pointInPolygon([B[0][0] + dx, B[0][1]], A)) return true;
@@ -237,19 +286,20 @@ function douglasPeucker(points, tol) {
 }
 
 function simplifyPolygon(points) {
-  if (!Array.isArray(points) || points.length <= MAX_OUTLINE_POINTS) return points.slice();
-  let simplified = douglasPeucker(points, SIMPLIFY_TOL_MM);
-  if (simplified.length > MAX_OUTLINE_POINTS) {
+  if (!Array.isArray(points)) return { points: [], tol: 0 };
+  if (points.length <= MAX_OUTLINE_POINTS) return { points: points.slice(), tol: 0 };
+  let tol = SIMPLIFY_TOL_MM;
+  let simplified = douglasPeucker(points, tol);
+  for (let attempt = 0; attempt < 16 && simplified.length > MAX_OUTLINE_POINTS; attempt++) {
     // Grow the tolerance until it fits. Unlike index sampling this never cuts a
     // corner off: it only drops vertices that are within `tol` of the segment
     // that replaces them, so the shape stays as large as the real cut line.
-    let tol = SIMPLIFY_TOL_MM;
-    for (let attempt = 0; attempt < 16 && simplified.length > MAX_OUTLINE_POINTS; attempt++) {
-      tol *= 1.5;
-      simplified = douglasPeucker(points, tol);
-    }
+    tol *= 1.5;
+    simplified = douglasPeucker(points, tol);
   }
-  return simplified;
+  // The caller needs the tolerance that actually survived, otherwise the safety
+  // offset cannot be sized to cover the incurred error.
+  return { points: simplified, tol };
 }
 
 function shapeKey(variant) {
@@ -342,7 +392,9 @@ function buildVariants(item, index, opts) {
   const rots = orientationRots(srcW, srcH).slice();
   if (opts.allowLandscape !== false) rots.push((rots[0] + 90) % 360, (rots[1] + 90) % 360);
 
-  const simplified = pieces.map((loop) => simplifyPolygon(loop));
+  const simplifiedResults = pieces.map((loop) => simplifyPolygon(loop));
+  const simplified = simplifiedResults.map((r) => r.points);
+  const simplifyTol = simplifiedResults.reduce((a, r) => Math.max(a, r.tol), 0);
   const allRaw = simplified.flat();
   const minX = Math.min(...allRaw.map((p) => p[0]));
   const minY = Math.min(...allRaw.map((p) => p[1]));
@@ -360,7 +412,11 @@ function buildVariants(item, index, opts) {
     // ClipperLib's positive delta is outward for a positively-oriented loop, so
     // +SAFETY_HALF_MM grows the outline by 0.125mm on every side. Verified: a
     // 46.15mm shape becomes 46.40mm, giving the two neighbours a 0.25mm gap.
-    const inflatedPieces = normPieces.map((loop) => inflatePolygon(loop, SAFETY_HALF_MM));
+    // The safety offset has to cover the simplification error as well: the shapes
+    // the collision test sees are the simplified ones, and a chord that cuts a
+    // corner inward shrinks them by up to SIMPLIFY_TOL_MM. Without this the real
+    // gap between printed outlines can drop below the promised clearance.
+    const inflatedPieces = normPieces.map((loop) => inflatePolygon(loop, SAFETY_HALF_MM + simplifyTol));
     const inflated = inflatedPieces.reduce((a, b) => (Math.abs(polygonArea(b)) > Math.abs(polygonArea(a)) ? b : a), inflatedPieces[0]);
     // The size covers every piece, so row height and the base filler can never
     // end up inside artwork the packer did not account for.
@@ -412,50 +468,41 @@ function minOffset(left, right, cache) {
   const lw = left.widthMm, rw = right.widthMm;
   const test = (dx) => polygonsOverlap(left.safe, right.safe, dx);
 
-  // Quick lower bound from the bounding boxes: at dx the right shape spans
-  // [dx + rmin, dx + rmax], so nothing can be free before lmax - rmin.
-  const lb = left.safe.bounds, rb = right.safe.bounds;
-  const floor = Math.max(0, lb.maxX - rb.minX);
-  // Nothing can still be blocked past lw + rw (fully separated).
+  // Nothing is blocked past lw + rw (the shapes are fully apart by construction).
   const ceiling = lw + rw;
-  // Search must begin where no bounding box can possibly clear yet, otherwise an
-  // interlocking arrangement (two L shapes sharing a corner) is never explored.
-  const start = Math.max(0, floor);
-  if (start > ceiling) { cache.set(key, null); return null; }
+  // The search must start at 0. Bounding-box separation is NOT a valid lower
+  // bound: two curved outlines interlock long before their boxes part, so
+  // starting at lmax - rmin silently turns the packer into a box packer.
+  if (!test(0)) { cache.set(key, 0); return 0; }
 
-  // Hybrid search: gallop forward to bracket the first free offset, then bisect.
-  // This is exact (the predicate is monotone) and needs far fewer pair tests than
-  // walking every 1 mm, which matters now that outlines keep real detail.
-  let hi = start;
-  let bracketed = false;
-  if (test(hi)) {
-    // Gallop: double the step until a free offset is found. The pair predicate is
-    // monotone in dx, so the answer lies between the last blocked offset and that
-    // free one and a bisection is exact.
-    let step = COARSE_STEP_MM;
-    let lo = hi;
-    while (lo < ceiling) {
-      hi = Math.min(ceiling, lo + step);
-      if (!test(hi)) { bracketed = true; break; }
-      lo = hi;
-      step *= 2;
-    }
-    if (!bracketed) {
-      // At the ceiling the shapes are fully apart by construction.
-      if (test(ceiling)) { cache.set(key, null); return null; }
-      hi = ceiling;
-      bracketed = true;
-    }
-    if (bracketed) {
-      let a = lo, b = hi;
-      while (b - a > 0.02) {
-        const mid = (a + b) / 2;
-        if (test(mid)) a = mid; else b = mid;
-      }
-      hi = b;
+  // Monotone predicate (blocked for small dx, free after), so read the shape of
+  // the blocking band with a coarse index scan first and bisect inside the one
+  // interval that contains the answer. The scan step shrinks automatically when
+  // the band turns out to be narrow, so nothing is skipped.
+  const coarse = COARSE_STEP_MM;
+  let step = coarse;
+  let scan = [];
+  for (;;) {
+    scan = [];
+    for (let dx = 0; dx <= ceiling + EPS; dx += step) scan.push({ dx: Math.min(dx, ceiling), blocked: test(Math.min(dx, ceiling)) });
+    const lastBlocked = scan.filter((p) => p.blocked).pop();
+    if (!lastBlocked || lastBlocked.dx < ceiling) break;
+    // Everything is blocked up to the ceiling: refine only if the step can shrink.
+    if (step <= 0.25) { cache.set(key, null); return null; }
+    step /= 2;
+    if (step < 0.5) step = 0.5;
+  }
+  const lastBlocked = scan.filter((p) => p.blocked).pop();
+  if (!lastBlocked) { cache.set(key, 0); return 0; }
+  const firstFree = scan.find((p) => !p.blocked && p.dx > lastBlocked.dx);
+  let a = lastBlocked.dx, b = firstFree ? firstFree.dx : ceiling;
+  if (!test(b)) {
+    while (b - a > 0.02) {
+      const mid = (a + b) / 2;
+      if (test(mid)) a = mid; else b = mid;
     }
   }
-  const value = Math.ceil(hi * 100) / 100;
+  const value = Math.ceil(b * 100) / 100;
   cache.set(key, value);
   return value;
 }
@@ -516,29 +563,269 @@ function rectsOverlap(a, b, gap) {
     a.yMm < b.yMm + b.heightMm + gap - EPS && b.yMm < a.yMm + a.heightMm + gap - EPS;
 }
 
-function fillBases(placements, opts) {
+// ---------------------------------------------------------------- bases
+// Base placement is a pure 2D occupancy problem, so it is solved as one: the
+// artwork (grown by the clearance) is rasterised once into an obstacle mask and
+// summed into an integral image. Any 35mm square can then be validated with four
+// array reads instead of thousands of segment tests.
+const BASE_RASTER_MM = 0.25;
+
+function buildObstacleGrid(placements, opts) {
+  const gap = Number(opts.clearanceMm ?? CLEARANCE_MM);
+  const W = Number(opts.sheetWidthMm ?? SHEET.widthMm);
+  const H = Number(opts.sheetHeightMm ?? SHEET.heightMm);
+  const r = BASE_RASTER_MM;
+  const cols = Math.ceil(W / r) + 2;
+  const rowsN = Math.ceil(H / r) + 2;
+  const mask = new Uint8Array(cols * rowsN);
+
+  const grow = gap + r; // covers cell quantisation and the inflate tolerance
+  for (const p of placements) {
+    const loops = Array.isArray(p.cutPaths) ? p.cutPaths : [];
+    const shift = p.outlineShift || [0, 0];
+    const m = p.matrix || [1, 0, 0, 1, p.xMm || 0, p.yMm || 0];
+    const polys = [];
+    for (const loop of loops) {
+      if (!Array.isArray(loop) || loop.length < 3) continue;
+      polys.push(loop.map(([x, y]) => {
+        const px = x + shift[0], py = y + shift[1];
+        return [m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]];
+      }));
+    }
+    if (!polys.length) {
+      polys.push([[p.xMm, p.yMm], [p.xMm + p.widthMm, p.yMm],
+        [p.xMm + p.widthMm, p.yMm + p.heightMm], [p.xMm, p.yMm + p.heightMm]]);
+    }
+    for (const poly of polys) {
+      const pts = poly;
+      // Dilate in raster space instead of inflating the polygon: offsetting a
+      // 3000-point outline is expensive and its rounded joins are then filled
+      // again per scanline. One separable pass is both faster and simpler.
+      // (grow is applied below as a cell radius.)
+      // Scanline fill, then a separable dilation by `grow` cells covers the gap.
+      let minY = Infinity, maxY = -Infinity;
+      for (const [, y] of pts) { if (y < minY) minY = y; if (y > maxY) maxY = y; }
+      const y0 = Math.max(0, Math.floor(minY / r) - 1);
+      const y1 = Math.min(rowsN - 1, Math.ceil(maxY / r) + 1);
+      for (let gy = y0; gy <= y1; gy++) {
+        const wy = (gy + 0.5) * r;
+        const xs = [];
+        for (let i = 0; i < pts.length; i++) {
+          const a = pts[i], b = pts[(i + 1) % pts.length];
+          if ((a[1] > wy) === (b[1] > wy)) continue;
+          xs.push(a[0] + ((wy - a[1]) * (b[0] - a[0])) / (b[1] - a[1]));
+        }
+        if (!xs.length) continue;
+        xs.sort((p1, p2) => p1 - p2);
+        for (let k = 0; k + 1 < xs.length; k += 2) {
+          const gx0 = Math.max(0, Math.floor(xs[k] / r));
+          const gx1 = Math.min(cols - 1, Math.ceil(xs[k + 1] / r));
+          for (let gx = gx0; gx <= gx1; gx++) mask[gy * cols + gx] = 1;
+        }
+      }
+    }
+  }
+
+  // Separable dilation by the required clearance (in cells).
+  dilateMask(mask, cols, rowsN, Math.max(1, Math.round(grow / r)));
+
+  // Integral image: 1 + one cell of padding so queries never need bounds checks.
+  const stride = cols + 1;
+  const integral = new Int32Array((rowsN + 1) * stride);
+  for (let y = 0; y < rowsN; y++) {
+    let run = 0;
+    for (let x = 0; x < cols; x++) {
+      run += mask[y * cols + x];
+      integral[(y + 1) * stride + (x + 1)] = integral[y * stride + (x + 1)] + run;
+    }
+  }
+  return { integral, mask, cols, rowsN, stride, r, W, H };
+}
+
+/** Binary dilation with a square structuring element, one axis at a time. */
+function dilateMask(mask, cols, rowsN, radius) {
+  if (radius <= 0) return mask;
+  const tmp = new Uint8Array(mask.length);
+  for (let y = 0; y < rowsN; y++) {
+    const row = y * cols;
+    for (let x = 0; x < cols; x++) {
+      if (!mask[row + x]) continue;
+      const lo = Math.max(0, x - radius), hi = Math.min(cols - 1, x + radius);
+      for (let k = lo; k <= hi; k++) tmp[row + k] = 1;
+    }
+  }
+  for (let y = 0; y < rowsN; y++) {
+    for (let x = 0; x < cols; x++) {
+      if (!tmp[y * cols + x]) continue;
+      const lo = Math.max(0, y - radius), hi = Math.min(rowsN - 1, y + radius);
+      for (let k = lo; k <= hi; k++) mask[k * cols + x] = 1;
+    }
+  }
+  return mask;
+}
+
+function makeSiteTester(grid, baseSize) {
+  const { integral, stride, r, cols, rowsN } = grid;
+  return (x, y) => {
+    // Cells fully inside the square; rounding inward keeps the check conservative.
+    const gx0 = Math.ceil((x + 1e-6) / r);
+    const gy0 = Math.ceil((y + 1e-6) / r);
+    const gx1 = Math.floor((x + baseSize - 1e-6) / r);
+    const gy1 = Math.floor((y + baseSize - 1e-6) / r);
+    if (gx0 < 0 || gy0 < 0 || gx1 >= cols || gy1 >= rowsN || gx1 < gx0 || gy1 < gy0) return false;
+    const sum = integral[(gy1 + 1) * stride + (gx1 + 1)]
+      - integral[gy0 * stride + (gx1 + 1)]
+      - integral[(gy1 + 1) * stride + gx0]
+      + integral[gy0 * stride + gx0];
+    return sum === 0;
+  };
+}
+
+function overlapsPlacedBase(bases, x, y, size, gap) {
+  for (const b of bases) {
+    if (x < b.xMm + b.widthMm + gap - EPS && b.xMm < x + size + gap - EPS &&
+        y < b.yMm + b.heightMm + gap - EPS && b.yMm < y + size + gap - EPS) return true;
+  }
+  return false;
+}
+
+function cloneGrid(grid) {
+  return {
+    integral: Int32Array.from(grid.integral),
+    mask: grid.mask ? Uint8Array.from(grid.mask) : null,
+    cols: grid.cols,
+    rowsN: grid.rowsN,
+    stride: grid.stride,
+    r: grid.r,
+    W: grid.W,
+    H: grid.H,
+  };
+}
+
+/** Burn a rectangle (grown by `gap`) into a grid so later queries reject it. */
+function shadowRect(grid, x, y, size, gap) {
+  const { integral, stride, cols, rowsN, r } = grid;
+  const gx0 = Math.max(0, Math.ceil((x - gap) / r));
+  const gy0 = Math.max(0, Math.ceil((y - gap) / r));
+  const gx1 = Math.min(cols - 1, Math.floor((x + size + gap) / r));
+  const gy1 = Math.min(rowsN - 1, Math.floor((y + size + gap) / r));
+  for (let gy = gy0; gy <= gy1; gy++) {
+    const rowBase = gy * stride;
+    for (let gx = gx0; gx <= gx1; gx++) {
+      const idx = rowBase + gx + 1;
+      if (integral[idx] - integral[idx - 1] > 0) continue; // already blocked
+      // Add 1 to this cell for every query window that covers it. Because the
+      // integral is additive, raising the cell and all cells to its right in this
+      // row by 1 keeps prefix sums correct.
+      for (let k = gx + 1; k <= cols; k++) integral[rowBase + k] += 1;
+    }
+  }
+}
+
+/**
+ * Strategy A: keep a regular lattice (bases stay aligned, which reads cleanly on
+ * the sheet) but stop anchoring it to the margin. Both lattice offsets are
+ * searched so the grid slides down onto the artwork instead of leaving the first
+ * column empty.
+ */
+function fillBasesLattice(opts, grid) {
   const baseSize = Number(opts.baseSizeMm ?? BASE_SIZE_MM);
   const gap = Number(opts.clearanceMm ?? CLEARANCE_MM);
   const margin = Number(opts.marginMm ?? MARGIN_MM);
   const W = Number(opts.sheetWidthMm ?? SHEET.widthMm);
   const H = Number(opts.sheetHeightMm ?? SHEET.heightMm);
-  const bases = [];
-  const occupied = placements.map((p) => ({ xMm: p.xMm, yMm: p.yMm, widthMm: p.widthMm, heightMm: p.heightMm }));
-  const fits = (x, y) => {
-    const candidate = { xMm: x, yMm: y, widthMm: baseSize, heightMm: baseSize };
-    for (const o of occupied) if (rectsOverlap(candidate, o, gap)) return false;
-    return true;
+  const fits = makeSiteTester(grid, baseSize);
+  const step = baseSize + gap;
+
+  const build = (ox, oy) => {
+    const bases = [];
+    for (let y = margin + oy; y + baseSize <= H - margin + EPS; y += step) {
+      for (let x = margin + ox; x + baseSize <= W - margin + EPS; x += step) {
+        if (!fits(x, y)) continue;
+        bases.push({ xMm: x, yMm: y, widthMm: baseSize, heightMm: baseSize });
+      }
+    }
+    return bases;
   };
-  const stepX = baseSize + gap;
-  for (let y = margin; y + baseSize <= H - margin + EPS; y += STEP_MM) {
-    for (let x = margin; x + baseSize <= W - margin + EPS; x += stepX) {
-      if (!fits(x, y)) continue;
-      const base = { xMm: x, yMm: y, widthMm: baseSize, heightMm: baseSize };
-      bases.push(base);
-      occupied.push(base);
+
+  // Offset search in two passes: a coarse sweep finds the promising region, then
+  // a fine sweep around it. Sweeping the full resolution everywhere costs dozens
+  // of times more for the same answer.
+  let best = [], bestOx = 0, bestOy = 0;
+  const sweep = (from, to, stepSize) => {
+    for (let oy = from; oy < to - EPS; oy += stepSize) {
+      for (let ox = from; ox < to - EPS; ox += stepSize) {
+        if (ox >= step - EPS || oy >= step - EPS) continue;
+        const bases = build(ox, oy);
+        if (bases.length > best.length) { best = bases; bestOx = ox; bestOy = oy; }
+      }
+    }
+  };
+  const coarse = 2;
+  sweep(0, step, coarse);
+  const lo = Math.max(0, Math.min(bestOx, bestOy) - coarse);
+  const hi = Math.min(step, Math.max(bestOx, bestOy) + coarse + coarse);
+  for (let oy = lo; oy <= hi + EPS; oy += BASE_RASTER_MM) {
+    for (let ox = lo; ox <= hi + EPS; ox += BASE_RASTER_MM) {
+      if (ox >= step - EPS || oy >= step - EPS) continue;
+      const bases = build(ox, oy);
+      if (bases.length > best.length) { best = bases; bestOx = ox; bestOy = oy; }
+    }
+  }
+  return best;
+}
+
+/**
+ * Strategy B: no lattice. Work in horizontal bands one base tall; inside each
+ * band keep the y that fits the most bases, then burn that strip into the mask so
+ * later bands cannot overlap it. Committing to the first legal y instead
+ * fragments the remaining area and yields fewer bases.
+ */
+function fillBasesDense(opts, grid) {
+  const baseSize = Number(opts.baseSizeMm ?? BASE_SIZE_MM);
+  const gap = Number(opts.clearanceMm ?? CLEARANCE_MM);
+  const margin = Number(opts.marginMm ?? MARGIN_MM);
+  const W = Number(opts.sheetWidthMm ?? SHEET.widthMm);
+  const H = Number(opts.sheetHeightMm ?? SHEET.heightMm);
+  const work = cloneGrid(grid);
+  const fits = makeSiteTester(work, baseSize);
+  const bases = [];
+
+  const bandStep = baseSize + gap;
+  for (let bandY = margin; bandY + baseSize <= H - margin + EPS; bandY += bandStep) {
+    let bestRow = null, bestY = null;
+    const yLimit = Math.min(bandY + bandStep, H - margin - baseSize);
+    for (let y = bandY; y <= yLimit + EPS; y += BASE_RASTER_MM) {
+      const row = [];
+      let cursor = margin;
+      while (cursor + baseSize <= W - margin + EPS) {
+        let found = null;
+        for (let x = cursor; x + baseSize <= W - margin + EPS; x += BASE_RASTER_MM) {
+          if (fits(x, y)) { found = x; break; }
+        }
+        if (found === null) break;
+        row.push({ xMm: found, yMm: y, widthMm: baseSize, heightMm: baseSize });
+        cursor = found + baseSize + gap;
+      }
+      if (!bestRow || row.length > bestRow.length) { bestRow = row; bestY = y; }
+    }
+    if (!bestRow || !bestRow.length) continue;
+    for (const b of bestRow) {
+      bases.push(b);
+      shadowRect(work, b.xMm, b.yMm, baseSize, gap);
     }
   }
   return bases;
+}
+
+function fillBases(placements, opts) {
+  const grid = buildObstacleGrid(placements, opts);
+  const lattice = fillBasesLattice(opts, grid);
+  let dense = [];
+  try { dense = fillBasesDense(opts, grid); } catch (_) { dense = []; }
+  const candidates = [lattice, dense];
+  // Both strategies are legal; ship whichever wastes less paper.
+  return candidates.sort((a, b) => b.length - a.length)[0];
 }
 
 // ---------------------------------------------------------------- packing

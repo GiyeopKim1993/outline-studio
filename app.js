@@ -474,9 +474,7 @@
       // the artwork canvas, and passing the box size here would rescale the art.
       // Cut/white loops are shifted onto the packer's normalised frame, so the PDF and
       // the preview put the outline exactly where the collision test assumed it.
-      const shift=p.outlineShift||[0,0];
-      const shifted=loops=>(loops||[]).map(l=>l.map(([x,y])=>[x+shift[0],y+shift[1]]));
-      const sheetItems=result.placements.map(p=>({...items[p._idx],cutPaths:shifted(items[p._idx].cutPaths),whitePaths:shifted(items[p._idx].whitePaths),xMm:p.xMm,yMm:p.yMm,widthMm:p.sourceWidthMm,heightMm:p.sourceHeightMm,rot:p.rot}));
+      const sheetItems=result.placements.map(p=>{const shift=p.outlineShift||[0,0],shifted=loops=>(loops||[]).map(l=>l.map(([x,y])=>[x+shift[0],y+shift[1]]));return {...items[p._idx],cutPaths:shifted(items[p._idx].cutPaths),whitePaths:shifted(items[p._idx].whitePaths),xMm:p.xMm,yMm:p.yMm,widthMm:p.sourceWidthMm,heightMm:p.sourceHeightMm,rot:p.rot};});
       const bases=result.bases.map(b=>({xMm:b.xMm,yMm:b.yMm,outer:g.outer,slit:g.slit}));
       const blob=await OutlinePDF.createSheet({sheetWidthMm:400,sheetHeightMm:300,items:sheetItems,bases,whiteName:names.white,cutName:names.cut});
       download(filenameStem(els.outputName.value)+'-nesting-400x300.pdf',blob);

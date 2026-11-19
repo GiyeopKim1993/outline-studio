@@ -97,11 +97,49 @@ const bbox = (pts) => {
   for (const [x, y] of pts) { a = Math.min(a, x); c = Math.max(c, x); b = Math.min(b, y); d = Math.max(d, y); }
   return [a, b, c, d];
 };
-// Overlap means "closer than the clearance the packer promises", not "touching".
-const CLEARANCE = 0.25;
-const bboxHit = (A, B, gap = CLEARANCE) =>
-  A[0] < B[2] - gap + 1e-3 && B[0] < A[2] - gap + 1e-3 &&
-  A[1] < B[3] - gap + 1e-3 && B[1] < A[3] - gap + 1e-3;
+// Real geometry helpers. Bounding boxes are useless here on purpose: curved
+// outlines interlock, so two items may share box space and still be far apart.
+const segDist = (p, a, b) => {
+  const vx = b[0] - a[0], vy = b[1] - a[1];
+  const L = vx * vx + vy * vy;
+  let t = L ? ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / L : 0;
+  t = Math.max(0, Math.min(1, t));
+  const dx = p[0] - (a[0] + t * vx), dy = p[1] - (a[1] + t * vy);
+  return Math.hypot(dx, dy);
+};
+/** Minimum distance between two closed outlines (0 when they touch or cross). */
+function outlineGap(A, B) {
+  let best = Infinity;
+  for (const [P, Q] of [[A, B], [B, A]]) {
+    for (const q of Q) {
+      for (let i = 0; i < P.length; i++) best = Math.min(best, segDist(q, P[i], P[(i + 1) % P.length]));
+    }
+  }
+  return best;
+}
+const crosses = (a, b, c, d) => {
+  const s = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+  const d1 = s(c, d, a), d2 = s(c, d, b), d3 = s(a, b, c), d4 = s(a, b, d);
+  return ((d1 > 1e-9 && d2 < -1e-9) || (d1 < -1e-9 && d2 > 1e-9)) &&
+         ((d3 > 1e-9 && d4 < -1e-9) || (d3 < -1e-9 && d4 > 1e-9));
+};
+function realOverlap(A, B) {
+  for (let i = 0; i < A.length; i++) {
+    for (let j = 0; j < B.length; j++) {
+      if (crosses(A[i], A[(i + 1) % A.length], B[j], B[(j + 1) % B.length])) return true;
+    }
+  }
+  return inside(A[0], B) || inside(B[0], A);
+}
+const bboxOf = (pts) => pts.reduce((b, [x, y]) => [
+  Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y),
+], [Infinity, Infinity, -Infinity, -Infinity]);
+
+/**
+ * Place a raw pixel loop the way the app does: shift by the placement's
+ * outlineShift, then apply the placement matrix.
+ */
+
 
 test('dense outlines are not sampled so hard that the shape shrinks', () => {
   const loop = organicOutline(50, 150, 1);
@@ -141,18 +179,20 @@ test('a mixed set of dense items never overlaps and no base lands on artwork', (
   for (let i = 0; i < 8; i++) items.push(mkItem(`m${i}`, 47 + i * 5, 130 + (i % 4) * 15, i * 3 + 1));
   const r = N.packNesting(items);
 
-  const outlines = r.placements.map((p) => { const all = p.cutPaths.map((l) => outlineOf(p, l)).flat(); return { b: bbox(all), loops: p.cutPaths.map((l) => outlineOf(p, l)) }; });
+  const outlines = r.placements.map((p) => p.cutPaths.map((l) => outlineOf(p, l)));
 
   for (let i = 0; i < outlines.length; i++) {
     for (let j = i + 1; j < outlines.length; j++) {
-      assert.equal(bboxHit(outlines[i].b, outlines[j].b), false,
-        `real extents overlap: ${r.placements[i].name} x ${r.placements[j].name}`);
+      for (const A of outlines[i]) for (const B of outlines[j]) {
+        assert.equal(realOverlap(A, B), false, `cut lines cross: ${r.placements[i].name} x ${r.placements[j].name}`);
+      }
     }
   }
   for (const base of r.bases) {
-    const box = [base.xMm, base.yMm, base.xMm + base.widthMm, base.yMm + base.heightMm];
-    for (const o of outlines) {
-      assert.equal(bboxHit(box, o.b), false, 'a base sits on artwork');
+    const box = [[base.xMm, base.yMm], [base.xMm + base.widthMm, base.yMm],
+      [base.xMm + base.widthMm, base.yMm + base.heightMm], [base.xMm, base.yMm + base.heightMm]];
+    for (const loops of outlines) for (const o of loops) {
+      assert.equal(realOverlap(box, o), false, 'a base sits on artwork');
     }
   }
 });
