@@ -133,13 +133,15 @@ test('placementMatrix maps artwork pixels onto the sheet for every rotation', ()
   }
 });
 
-test('outline interlocking allows items closer than bounding boxes', () => {
-  // L-shaped items: their bounding boxes overlap, the outlines do not.
+test('items are packed against their real outline and keep the 0.25mm gap', () => {
+  // L-shaped items: the packer must reason about the outline, not the box, and
+  // must still leave exactly the configured clearance on the real cut lines.
   const ell = [[0, 0], [60, 0], [60, 20], [20, 20], [20, 80], [0, 80]];
   const r = packNesting([item('L1', 60, 80, { cutPaths: [ell] }), item('L2', 60, 80, { cutPaths: [ell] })]);
   assert.equal(r.placements.length, 2);
   const [a, b] = r.placements;
-  assert.ok(b.xMm < a.xMm + a.widthMm, 'second item intrudes into the first item bbox (interlocked)');
+  const gap = b.xMm - (a.xMm + a.widthMm);
+  assert.ok(Math.abs(gap - 0.25) < 0.06, `neighbours keep a 0.25mm gap on the outline, got ${gap.toFixed(3)}`);
 });
 
 test('rejects empty or invalid input', () => {

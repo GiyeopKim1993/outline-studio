@@ -161,11 +161,19 @@ test('rapid tab clicks cannot save one item\'s white onto another', async () => 
     if (b && !b.disabled) b.dispatchEvent(new window.Event('click'));
   };
 
-  // Establish each item's honest white report, one at a time.
-  click(0); await settle(window, 400);
-  const firstInfo = info();
-  click(1); await settle(window, 400);
-  const secondInfo = info();
+  // Establish each item's honest white report, one at a time. Wait until the item
+  // has actually restored: the placeholder text is not a real baseline.
+  const readSettled = async (i) => {
+    click(i);
+    for (let attempt = 0; attempt < 25; attempt++) {
+      await settle(window, 120);
+      const text = info();
+      if (/화이트 면적/.test(text)) return text;
+    }
+    return info();
+  };
+  const firstInfo = await readSettled(0);
+  const secondInfo = await readSettled(1);
   assert.notEqual(firstInfo, secondInfo, 'the two items must have different white areas');
 
   // Now fire the same trip without waiting for the previous restore to finish.

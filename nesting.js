@@ -34,16 +34,42 @@ const EPS = 1e-9;
 let clipperLib = null;
 function getClipper() {
   if (clipperLib) return clipperLib;
+  const roots = [];
+  try { if (typeof ClipperLib !== 'undefined' && ClipperLib) roots.push(ClipperLib); } catch (_) {}
+  try { if (typeof window !== 'undefined' && window.ClipperLib) roots.push(window.ClipperLib); } catch (_) {}
+  try { if (typeof globalThis !== 'undefined' && globalThis.ClipperLib) roots.push(globalThis.ClipperLib); } catch (_) {}
+  // ClipperLib only publishes itself to `window` when a DOM exists; exposeClipper()
+  // lets a host inject the module it loaded without a document.
+  try { if (typeof window !== 'undefined' && window.__clipperModule) roots.push(window.__clipperModule); } catch (_) {}
+  for (const candidate of roots) {
+    if (candidate && typeof candidate.ClipperOffset === 'function' && candidate.Paths) {
+      clipperLib = candidate;
+      return clipperLib;
+    }
+  }
   try {
-    if (typeof ClipperLib !== 'undefined') clipperLib = ClipperLib;
-    else if (typeof require === 'function') clipperLib = require('./vendor/clipper.js');
-  } catch (_) { clipperLib = null; }
-  return clipperLib;
+    if (typeof require === 'function') {
+      const mod = require('./vendor/clipper.js');
+      if (mod && mod.ClipperOffset) { clipperLib = mod; return clipperLib; }
+    }
+  } catch (_) { /* no bundler */ }
+  // Never return a half-working object: no offset is better than a silent no-op.
+  return null;
 }
+
+// Host hook: inject the loaded ClipperLib module explicitly.
+function exposeClipper(moduleRef) {
+  if (moduleRef && moduleRef.ClipperOffset && moduleRef.Paths) {
+    clipperLib = moduleRef;
+    return true;
+  }
+  return false;
+}
+
 
 function inflatePolygon(points, deltaMm) {
   const C = getClipper();
-  if (!C || !(deltaMm > 0) || !Array.isArray(points) || points.length < 3) return points;
+  if (!C || !deltaMm || !Array.isArray(points) || points.length < 3) return points;
   const scale = 1000;
   try {
     // ClipperLib.Paths() is a bare prototype object, so paths must be pushed.
@@ -172,6 +198,14 @@ function polygonsOverlap(left, right, dx) {
 // Collision tests run per pair and per offset step, so outlines are reduced to a
 // small set of points that stays within SIMPLIFY_TOL_MM of the real cutline.
 const SIMPLIFY_TOL_MM = 0.03;
+// Outlines from a 300dpi artwork carry thousands of points. Index-sampling them
+// down used to drop detail and UNDERSTATE the shape, so two items could be packed
+// closer than their real cut lines allow. Never sample: raise the simplification
+// tolerance instead, which only removes points that are already near-collinear.
+// Douglas-Peucker at a few tenths of a millimetre keeps the measured size
+// bit-for-bit while cutting 3000 points down to ~200, which is what the pair
+// search actually needs. Index sampling was the mistake: it discarded real
+// geometry and made the item look smaller than its cut line.
 const MAX_OUTLINE_POINTS = 96;
 
 function douglasPeucker(points, tol) {
@@ -206,9 +240,14 @@ function simplifyPolygon(points) {
   if (!Array.isArray(points) || points.length <= MAX_OUTLINE_POINTS) return points.slice();
   let simplified = douglasPeucker(points, SIMPLIFY_TOL_MM);
   if (simplified.length > MAX_OUTLINE_POINTS) {
-    const stride = Math.ceil(simplified.length / MAX_OUTLINE_POINTS);
-    const sampled = simplified.filter((_, i) => i % stride === 0);
-    if (sampled.length >= 3) simplified = sampled;
+    // Grow the tolerance until it fits. Unlike index sampling this never cuts a
+    // corner off: it only drops vertices that are within `tol` of the segment
+    // that replaces them, so the shape stays as large as the real cut line.
+    let tol = SIMPLIFY_TOL_MM;
+    for (let attempt = 0; attempt < 16 && simplified.length > MAX_OUTLINE_POINTS; attempt++) {
+      tol *= 1.5;
+      simplified = douglasPeucker(points, tol);
+    }
   }
   return simplified;
 }
@@ -304,6 +343,9 @@ function buildVariants(item, index, opts) {
   if (opts.allowLandscape !== false) rots.push((rots[0] + 90) % 360, (rots[1] + 90) % 360);
 
   const simplified = pieces.map((loop) => simplifyPolygon(loop));
+  const allRaw = simplified.flat();
+  const minX = Math.min(...allRaw.map((p) => p[0]));
+  const minY = Math.min(...allRaw.map((p) => p[1]));
   const variants = [];
   for (const rot of rots) {
     const rotated = simplified.map((loop) => rotatePolygon(loop, rot));
@@ -315,6 +357,9 @@ function buildVariants(item, index, opts) {
     // Do NOT re-normalise the inflated outline: its -0.125 offset is what
     // guarantees the 0.25 mm gap between two neighbouring items.
     // Inflate every piece so the 0.25 mm gap applies around the whole item.
+    // ClipperLib's positive delta is outward for a positively-oriented loop, so
+    // +SAFETY_HALF_MM grows the outline by 0.125mm on every side. Verified: a
+    // 46.15mm shape becomes 46.40mm, giving the two neighbours a 0.25mm gap.
     const inflatedPieces = normPieces.map((loop) => inflatePolygon(loop, SAFETY_HALF_MM));
     const inflated = inflatedPieces.reduce((a, b) => (Math.abs(polygonArea(b)) > Math.abs(polygonArea(a)) ? b : a), inflatedPieces[0]);
     // The size covers every piece, so row height and the base filler can never
@@ -326,6 +371,8 @@ function buildVariants(item, index, opts) {
       rot,
       widthMm,
       heightMm,
+      // Pixel-space shift that moves the raw outline onto the normalised frame.
+      outlineShift: [-minX * ppm, -minY * ppm],
       points: norm.points,
       pieces: normPieces,
       inflated,
@@ -364,19 +411,49 @@ function minOffset(left, right, cache) {
   if (cache.has(key)) return cache.get(key);
   const lw = left.widthMm, rw = right.widthMm;
   const test = (dx) => polygonsOverlap(left.safe, right.safe, dx);
-  const start = Math.max(0, lw - Math.min(rw, MAX_PAIR_PROBE_MM));
-  const limit = lw + 1;
-  let found = null, lastHit = start - COARSE_STEP_MM;
-  for (let dx = start; dx <= limit + EPS; dx += COARSE_STEP_MM) {
-    if (!test(dx)) { found = dx; break; }
-    lastHit = dx;
-  }
-  if (found === null) { cache.set(key, null); return null; }
-  // Refine between the last colliding offset and the first free one.
-  let lo = Math.max(start, lastHit), hi = found;
-  while (hi - lo > 0.05) {
-    const mid = (lo + hi) / 2;
-    if (test(mid)) lo = mid; else hi = mid;
+
+  // Quick lower bound from the bounding boxes: at dx the right shape spans
+  // [dx + rmin, dx + rmax], so nothing can be free before lmax - rmin.
+  const lb = left.safe.bounds, rb = right.safe.bounds;
+  const floor = Math.max(0, lb.maxX - rb.minX);
+  // Nothing can still be blocked past lw + rw (fully separated).
+  const ceiling = lw + rw;
+  // Search must begin where no bounding box can possibly clear yet, otherwise an
+  // interlocking arrangement (two L shapes sharing a corner) is never explored.
+  const start = Math.max(0, floor);
+  if (start > ceiling) { cache.set(key, null); return null; }
+
+  // Hybrid search: gallop forward to bracket the first free offset, then bisect.
+  // This is exact (the predicate is monotone) and needs far fewer pair tests than
+  // walking every 1 mm, which matters now that outlines keep real detail.
+  let hi = start;
+  let bracketed = false;
+  if (test(hi)) {
+    // Gallop: double the step until a free offset is found. The pair predicate is
+    // monotone in dx, so the answer lies between the last blocked offset and that
+    // free one and a bisection is exact.
+    let step = COARSE_STEP_MM;
+    let lo = hi;
+    while (lo < ceiling) {
+      hi = Math.min(ceiling, lo + step);
+      if (!test(hi)) { bracketed = true; break; }
+      lo = hi;
+      step *= 2;
+    }
+    if (!bracketed) {
+      // At the ceiling the shapes are fully apart by construction.
+      if (test(ceiling)) { cache.set(key, null); return null; }
+      hi = ceiling;
+      bracketed = true;
+    }
+    if (bracketed) {
+      let a = lo, b = hi;
+      while (b - a > 0.02) {
+        const mid = (a + b) / 2;
+        if (test(mid)) a = mid; else b = mid;
+      }
+      hi = b;
+    }
   }
   const value = Math.ceil(hi * 100) / 100;
   cache.set(key, value);
@@ -516,6 +593,10 @@ function packNesting(items, options = {}) {
     for (const p of row.placed) {
       const b = p.built;
       const xMm = opts.marginMm + p.xMm;
+      // The packer normalises each outline to its own bounding box. The placement
+      // hands raw pixel loops to the preview and the PDF, so shift them by the
+      // same amount or every drawn cut line is offset from its declared box.
+      const outlineShift = p.variant.outlineShift || [0, 0];
       placements.push({
         name: b.item.name,
         _idx: b.index,
@@ -533,6 +614,7 @@ function packNesting(items, options = {}) {
         artwork: b.item.artwork,
         whitePaths: b.item.whitePaths,
         cutPaths: b.item.cutPaths,
+        outlineShift,
       });
       const at = pool.indexOf(b);
       if (at >= 0) pool.splice(at, 1);
@@ -608,8 +690,11 @@ function nestingPreviewSvg(result, opts = {}) {
     const srcW = p.width || 1, srcH = p.height || 1;
     const inner = [];
     if (thumb) inner.push(`<image href="${thumb}" x="0" y="0" width="${srcW}" height="${srcH}" preserveAspectRatio="none" opacity="0.9"/>`);
-    // Every loop is drawn: a detached halo or prop is part of the item.
-    const cut = Array.isArray(p.cutPaths) && p.cutPaths.length ? p.cutPaths.map((loop) => pathData(loop)).join('') : '';
+    // Every loop is drawn, shifted onto the same normalised frame the packer sized.
+    const shift = p.outlineShift || [0, 0];
+    const cut = Array.isArray(p.cutPaths) && p.cutPaths.length
+      ? p.cutPaths.map((loop) => pathData(loop.map(([x, y]) => [x + shift[0], y + shift[1]]))).join('')
+      : '';
     if (cut) inner.push(`<path d="${cut}" fill="none" stroke="#3465e8" stroke-width="${0.2 * (p.pixelsPerMm || 1)}" stroke-linejoin="round"/>`);
     // 방향 표시: 180° 회전하면 표시가 반대쪽 모서리로 간다.
     inner.push(`<path d="M0 0 L${8 * (p.pixelsPerMm || 1)} 0 L0 ${8 * (p.pixelsPerMm || 1)} Z" fill="#3465e8" opacity="0.45"/>`);
@@ -630,11 +715,13 @@ if (typeof module !== 'undefined') {
   module.exports = {
     SHEET, MARGIN_MM, CLEARANCE_MM, BASE_SIZE_MM, STEP_MM,
     packNesting, nestingPreviewSvg, placementMatrix, polygonsOverlap, minOffset, rotatePolygon,
+    exposeClipper, getClipper,
   };
 }
 if (typeof window !== 'undefined') {
   window.OutlineNesting = {
     SHEET, MARGIN_MM, CLEARANCE_MM, BASE_SIZE_MM, STEP_MM,
     packNesting, nestingPreviewSvg, placementMatrix,
+    exposeClipper, getClipper,
   };
 }
