@@ -463,7 +463,9 @@
       if(!result.placements.length)throw new Error('시트에 배치할 수 있는 이미지가 없습니다.');
       const tolerance=Number($('baseTolerance')?.value??0.3);
       const g=window.OutlineNestingGeometry.createBaseGeometry(tolerance);
-      const sheetItems=result.placements.map(p=>({...items[p._idx],xMm:p.xMm,yMm:p.yMm,widthMm:p.widthMm,heightMm:p.heightMm,rot:p.rot}));
+      // The item travels at its own full size. The placed box may be smaller than
+      // the artwork canvas, and passing the box size here would rescale the art.
+      const sheetItems=result.placements.map(p=>({...items[p._idx],xMm:p.xMm,yMm:p.yMm,widthMm:p.sourceWidthMm,heightMm:p.sourceHeightMm,rot:p.rot}));
       const bases=result.bases.map(b=>({xMm:b.xMm,yMm:b.yMm,outer:g.outer,slit:g.slit}));
       const blob=await OutlinePDF.createSheet({sheetWidthMm:400,sheetHeightMm:300,items:sheetItems,bases,whiteName:names.white,cutName:names.cut});
       download(filenameStem(els.outputName.value)+'-nesting-400x300.pdf',blob);

@@ -64,7 +64,8 @@ function readContentMatrices(buf) {
     streams.push(text);
   }
   const content = streams.find((t) => t.includes('Artwork0')) || '';
-  return [...content.matchAll(/\/ArtOverprint gs\n([-\d. ]+) cm\n\/Artwork(\d+) Do/g)]
+  // Artwork is now clipped: "cm", then the cut path + "W* n", then "Do".
+  return [...content.matchAll(/\/ArtOverprint gs\n([-\d. ]+) cm\n[\s\S]*?\/Artwork(\d+) Do/g)]
     .map((mm) => mm[1].trim().split(/\s+/).map(Number));
 }
 

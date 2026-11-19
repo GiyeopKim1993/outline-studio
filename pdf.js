@@ -163,7 +163,10 @@
       const yTopPt = (sheetHeightMm - it.yMm) * ptPerMm;
       const s = ptPerMm / it.pixelsPerMm;
       const mat = placementMatrixPt(it);
-      cmds.push(`/OC /ArtLayer BDC\nq\n/ArtOverprint gs\n${mat} cm\n/Artwork${i} Do\nQ\nEMC`);
+      // Artwork is clipped to the cut outline. Without this, art that spills past
+      // the cut (a halo drawn outside the MediaBox, bleed left in the source PDF)
+      // would print outside the item and overlap its neighbours on the sheet.
+      cmds.push(`/OC /ArtLayer BDC\nq\n/ArtOverprint gs\n${mat} cm\n${vectorPath(it.cutPaths)}\nW* n\n/Artwork${i} Do\nQ\nEMC`);
       cmds.push(`/OC /WhiteLayer BDC\nq\n/WhiteOverprint gs\n${mat} cm\n/WhiteSpot cs\n1 scn\n${vectorPath(it.whitePaths)}\nf*\nQ\nEMC`);
       cmds.push(`/OC /CutLayer BDC\nq\n/CutOverprint gs\n${mat} cm\n/CutSpot CS\n1 SCN\n${pdfNumber(0.2 * it.pixelsPerMm)} w\n1 J 1 j\n${vectorPath(it.cutPaths)}\nS\nQ\nEMC`);
     });

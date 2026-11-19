@@ -138,11 +138,7 @@ function pointInPolygon(pt, poly) {
 }
 
 // Do two normalised polygons overlap when the right one is shifted by dx?
-function polygonsOverlap(left, right, dx) {
-  const lx = left.bounds, rx = right.bounds;
-  if (lx.maxX + dx <= rx.minX + EPS || rx.maxX + dx <= lx.minX + EPS) return false;
-  if (lx.maxY <= rx.minY + EPS || rx.maxY <= lx.minY + EPS) return false;
-  const A = left.points, B = right.points;
+function polygonPairOverlap(A, B, dx) {
   for (let i = 0; i < A.length; i++) {
     const a1 = A[i], a2 = A[(i + 1) % A.length];
     for (let j = 0; j < B.length; j++) {
@@ -152,6 +148,23 @@ function polygonsOverlap(left, right, dx) {
   }
   if (pointInPolygon([B[0][0] + dx, B[0][1]], A)) return true;
   if (pointInPolygon([A[0][0] - dx, A[0][1]], B)) return true;
+  return false;
+}
+
+// Do two normalised shapes overlap when the right one is shifted by dx?
+// A shape is every piece the cutter will follow, so a detached halo or a loose
+// prop blocks a neighbour exactly like the body does.
+function polygonsOverlap(left, right, dx) {
+  const lx = left.bounds, rx = right.bounds;
+  if (lx.maxX + dx <= rx.minX + EPS || rx.maxX + dx <= lx.minX + EPS) return false;
+  if (lx.maxY <= rx.minY + EPS || rx.maxY <= lx.minY + EPS) return false;
+  const leftPieces = left.pieces || [left.points];
+  const rightPieces = right.pieces || [right.points];
+  for (const A of leftPieces) {
+    for (const B of rightPieces) {
+      if (polygonPairOverlap(A, B, dx)) return true;
+    }
+  }
   return false;
 }
 
@@ -211,15 +224,55 @@ function shapeKey(variant) {
 }
 
 // ---------------------------------------------------------------- items
+// Every cut loop of the item, as one non-overlapping region.
+//
+// A character standee is usually several loops: the body plus a detached halo,
+// a floating prop or a loose strand. Taking only the largest loop made the
+// packer believe the item was smaller than it is, so rows were too short and
+// bases landed on the part it could not see. Unioning the loops keeps the true
+// footprint while still letting a real hole stay a hole.
 function cutOutlineOf(item) {
   const loops = Array.isArray(item.cutPaths) ? item.cutPaths.filter((p) => Array.isArray(p) && p.length >= 3) : [];
   if (!loops.length) return null;
+
+  const C = getClipper();
+  if (C) {
+    try {
+      const scale = 1000;
+      const subject = new C.Paths();
+      for (const loop of loops) {
+        subject.push(loop.map(([x, y]) => ({ X: Math.round(x * scale), Y: Math.round(y * scale) })));
+      }
+      // Even-odd fill: loops inside another loop are genuine holes, kept as holes.
+      const tree = C.Clipper.SimplifyPolygons(subject, C.PolyFillType.pftEvenOdd);
+      const unioned = C.Clipper.Union(tree, C.PolyFillType.pftEvenOdd);
+      if (unioned && unioned.length) {
+        // The dominant loop defines the outline used for collision, but every
+        // loop still contributes to the bounding size below.
+        let best = null, bestArea = -1;
+        for (const path of unioned) {
+          const area = Math.abs(C.Clipper.Area(path));
+          if (area > bestArea) { bestArea = area; best = path; }
+        }
+        if (best) {
+          const outer = best.map((p) => [p.X / scale, p.Y / scale]);
+          // Keep the full region too, so the true footprint is never underestimated.
+          outer.fullRegion = unioned.map((path) => path.map((p) => [p.X / scale, p.Y / scale]));
+          return outer;
+        }
+      }
+    } catch (_) { /* fall through to the plain union below */ }
+  }
+  // No Clipper (or it failed): fall back to the largest loop, never smaller than
+  // any single loop, and remember the rest so the size stays honest.
   let best = loops[0], bestArea = Math.abs(polygonArea(loops[0]));
   for (const loop of loops.slice(1)) {
     const area = Math.abs(polygonArea(loop));
     if (area > bestArea) { best = loop; bestArea = area; }
   }
-  return best;
+  const copy = best.map(([x, y]) => [x, y]);
+  copy.fullRegion = loops.map((loop) => loop.map(([x, y]) => [x, y]));
+  return copy;
 }
 
 function ppmOf(item) {
@@ -239,28 +292,53 @@ function buildVariants(item, index, opts) {
   const srcH = item.heightMm > 0 ? item.heightMm : (item.height || 0) / ppm;
   if (!(srcW > 0) || !(srcH > 0)) throw new Error(`아이템 크기가 올바르지 않습니다: ${item.name || index}`);
 
-  let outline = cutOutlineOf(item);
-  if (outline) outline = outline.map(([x, y]) => [x / ppm, y / ppm]);
-  else outline = [[0, 0], [srcW, 0], [srcW, srcH], [0, srcH]];
+  const outline = cutOutlineOf(item);
+  // Every separate piece the cutter will follow. Collision and size must both be
+  // derived from this full set, otherwise detached parts are invisible to packing.
+  const pieces = outline
+    ? (outline.fullRegion && outline.fullRegion.length ? outline.fullRegion : [outline])
+        .map((loop) => loop.map(([x, y]) => [x / ppm, y / ppm]))
+    : [[[0, 0], [srcW, 0], [srcW, srcH], [0, srcH]]];
 
   const rots = orientationRots(srcW, srcH).slice();
   if (opts.allowLandscape !== false) rots.push((rots[0] + 90) % 360, (rots[1] + 90) % 360);
 
-  const simplified = simplifyPolygon(outline);
+  const simplified = pieces.map((loop) => simplifyPolygon(loop));
   const variants = [];
   for (const rot of rots) {
-    const rotated = rotatePolygon(simplified, rot);
-    const norm = normalizePolygon(rotated);
+    const rotated = simplified.map((loop) => rotatePolygon(loop, rot));
+    // Normalise all pieces by the SAME offset so their relative positions survive.
+    const allPoints = rotated.flat();
+    const norm = normalizePolygon(allPoints);
+    const shift = [-bounds(allPoints).minX, -bounds(allPoints).minY];
+    const normPieces = rotated.map((loop) => loop.map(([x, y]) => [x + shift[0], y + shift[1]]));
     // Do NOT re-normalise the inflated outline: its -0.125 offset is what
     // guarantees the 0.25 mm gap between two neighbouring items.
-    const inflated = inflatePolygon(norm.points, SAFETY_HALF_MM);
+    // Inflate every piece so the 0.25 mm gap applies around the whole item.
+    const inflatedPieces = normPieces.map((loop) => inflatePolygon(loop, SAFETY_HALF_MM));
+    const inflated = inflatedPieces.reduce((a, b) => (Math.abs(polygonArea(b)) > Math.abs(polygonArea(a)) ? b : a), inflatedPieces[0]);
+    // The size covers every piece, so row height and the base filler can never
+    // end up inside artwork the packer did not account for.
+    const pieceBounds = normPieces.map((loop) => bounds(loop));
+    const widthMm = Math.max(...pieceBounds.map((b) => b.maxX)) - Math.min(...pieceBounds.map((b) => b.minX));
+    const heightMm = Math.max(...pieceBounds.map((b) => b.maxY)) - Math.min(...pieceBounds.map((b) => b.minY));
     variants.push({
       rot,
-      widthMm: norm.widthMm,
-      heightMm: norm.heightMm,
+      widthMm,
+      heightMm,
       points: norm.points,
+      pieces: normPieces,
       inflated,
-      safe: { points: inflated, bounds: bounds(inflated) },
+      safe: {
+        points: inflated,
+        pieces: inflatedPieces,
+        bounds: {
+          minX: Math.min(...inflatedPieces.map((p) => bounds(p).minX)),
+          minY: Math.min(...inflatedPieces.map((p) => bounds(p).minY)),
+          maxX: Math.max(...inflatedPieces.map((p) => bounds(p).maxX)),
+          maxY: Math.max(...inflatedPieces.map((p) => bounds(p).maxY)),
+        },
+      },
     });
   }
   return { item, index, srcW, srcH, ppm, variants };
@@ -530,6 +608,7 @@ function nestingPreviewSvg(result, opts = {}) {
     const srcW = p.width || 1, srcH = p.height || 1;
     const inner = [];
     if (thumb) inner.push(`<image href="${thumb}" x="0" y="0" width="${srcW}" height="${srcH}" preserveAspectRatio="none" opacity="0.9"/>`);
+    // Every loop is drawn: a detached halo or prop is part of the item.
     const cut = Array.isArray(p.cutPaths) && p.cutPaths.length ? p.cutPaths.map((loop) => pathData(loop)).join('') : '';
     if (cut) inner.push(`<path d="${cut}" fill="none" stroke="#3465e8" stroke-width="${0.2 * (p.pixelsPerMm || 1)}" stroke-linejoin="round"/>`);
     // 방향 표시: 180° 회전하면 표시가 반대쪽 모서리로 간다.
