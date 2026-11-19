@@ -12,7 +12,27 @@
     metricStatus:$('metricStatus'),metricSize:$('metricSize'),metricComponents:$('metricComponents'),metricHoles:$('metricHoles'),metricWebs:$('metricWebs')
   };
   const state={file:null,sourceBitmap:null,artCanvas:null,overlayCanvas:null,w:0,h:0,ppm:0,artMask:null,whitePaths:[],whiteAreaMm2:0,autoMask:null,mask:null,tool:'brush',painting:false,lastPoint:null,history:[],metrics:null,sourceName:'',cursor:null,dirty:false,customFileName:false,busy:false,loadVersion:0,showArt:true,showWhite:true,showCut:true};
-  let batchFiles=[],batchResults=[],batchIndex=-1,batchBusy=false;
+  let batchFiles=[],batchBusy=false;
+  // One editing operation at a time. A tab click can never interleave with
+  // the middle of a batch item and leave `state` half-loaded.
+  let editorQueue=Promise.resolve();
+  // Bumped whenever the file list is replaced. An in-flight run that sees a
+  // newer generation stops writing instead of filling the new batch.
+  let batchGeneration=0;
+  function withEditor(fn){
+    const run=editorQueue.then(fn,fn);
+    // Keep the queue alive, but never let a failure vanish silently.
+    editorQueue=run.catch(()=>{});
+    // Reported, not rethrown: these run from event listeners, so throwing would
+    // only produce an unhandled rejection nobody can act on.
+    return run.catch(err=>{console.error(err);toast('작업 실패: '+(err&&err.message?err.message:err));});
+  }
+  // Results live in a store that requires an explicit slot on every write,
+  // so a tab switch mid-batch can no longer redirect a result.
+  const batchStore=new OutlineBatchStore.BatchStore(0);
+  const renderState=new OutlineRenderState.RenderState(snapshot=>{if(snapshot)Object.assign(state,snapshot);});
+  // Debug handle: lets the test suite observe internal work without scraping the UI.
+  window.__outline={state,batchStore,renderState};
   const pdfNestingItems=[];
   const DPI=300, PAD_MM=10, MIN_CORE_MM2=25, WHITE_CHOKE_MM=0.15;
   let toastTimer=0;
@@ -387,9 +407,9 @@
       items.push(pdf);
     }
     if(batchFiles.length>1){
-      if(batchIndex>=0&&state.mask)await saveBatchCurrent();
-      for(let i=0;i<batchResults.length;i++){
-        const r=batchResults[i];if(!r||!r.maskRle)continue;
+      if(batchStore.active>=0&&state.mask)await saveBatchInto(batchStore.active);
+      for(let i=0;i<batchFiles.length;i++){
+        const r=batchStore.get(i);if(!r||!r.maskRle)continue;
         const mask=unpackMask(r.maskRle,r.pixels),box=cropBoxFor(mask,r.w,r.h);
         const full=await canvasFromBlob(r.artBlob,r.w,r.h);
         const artwork=cropCanvas(full,box);
@@ -453,7 +473,7 @@
     }catch(e){console.error(e);status.textContent='네스팅 PDF 생성 실패: '+e.message;setStatus('네스팅 PDF 생성 실패: '+e.message,'error');toast(e.message);}
   }
 
-  async function loadFile(file){if(!file)return;if(state.busy){toast('처리가 끝난 뒤 새 이미지를 선택하세요.');return;}setFlowStage(1);$('workflowStep2').disabled=true;if(!/image\/(png|webp)/.test(file.type)){toast('투명 알파가 있는 PNG 또는 WEBP 이미지를 선택하세요.');return;}const loadVersion=++state.loadVersion;state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.history=[];state.metrics=null;state.dirty=false;setEnabled(false);updateWhiteInfo();resetScaffoldInfo();els.processBtn.disabled=true;state.file=file;state.sourceName=file.name;if(!state.customFileName)els.outputName.value=filenameStem(file.name.replace(/\.(?:png|webp)$/i,''));
+  async function loadFile(file,slot=-1){if(!file)return;if(state.busy){toast('처리가 끝난 뒤 새 이미지를 선택하세요.');return;}setFlowStage(1);$('workflowStep2').disabled=true;if(!/image\/(png|webp)/.test(file.type)){toast('투명 알파가 있는 PNG 또는 WEBP 이미지를 선택하세요.');return;}const loadVersion=++state.loadVersion;if(slot>=0)batchStore.setActive(slot);state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.history=[];state.metrics=null;state.dirty=false;state.whitePaths=[];state.whiteAreaMm2=0;state.metrics=null;state.artCanvas=null;state.overlayCanvas=null;setEnabled(false);updateWhiteInfo();resetScaffoldInfo();els.processBtn.disabled=true;state.file=file;state.sourceName=file.name;if(!state.customFileName)els.outputName.value=filenameStem(file.name.replace(/\.(?:png|webp)$/i,''));
     try{const bitmap=await createImageBitmap(file);if(loadVersion!==state.loadVersion){bitmap.close();return;}if(state.sourceBitmap)state.sourceBitmap.close();state.sourceBitmap=bitmap;const tmp=document.createElement('canvas');tmp.width=bitmap.width;tmp.height=bitmap.height;tmp.getContext('2d').drawImage(bitmap,0,0);const data=tmp.getContext('2d').getImageData(0,0,tmp.width,tmp.height).data;let minX=tmp.width,minY=tmp.height,maxX=-1,maxY=-1,hasTransparency=false;for(let y=0;y<tmp.height;y++)for(let x=0;x<tmp.width;x++){const a=data[(y*tmp.width+x)*4+3];if(a<250)hasTransparency=true;if(a>1){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}}
       if(maxX<minX)throw new Error('alpha 채널에서 전경을 찾을 수 없습니다.');if(!hasTransparency){state.file=null;els.processBtn.disabled=true;setStatus('투명 알파가 없습니다. 배경이 제거된 PNG/WEBP를 선택하세요.','error');toast('투명 알파가 있는 입력이 필요합니다.');return;}const cw=maxX-minX+1,ch=maxY-minY+1;const crop=document.createElement('canvas');crop.width=cw;crop.height=ch;crop.getContext('2d').drawImage(tmp,minX,minY,cw,ch,0,0,cw,ch);state.croppedCanvas=crop;
       els.fileMeta.classList.remove('hidden');els.fileMeta.innerHTML=`<b>${escapeHtml(file.name)}</b><br>${bitmap.width} × ${bitmap.height}px · alpha bbox ${cw} × ${ch}px`;
@@ -462,14 +482,79 @@
       els.canvasWrap.classList.remove('empty-state');els.canvasWrap.classList.add('has-image');const ctx=els.canvas.getContext('2d');els.canvas.width=bitmap.width;els.canvas.height=bitmap.height;ctx.drawImage(bitmap,0,0);els.canvas.style.display='block';
     }catch(e){if(loadVersion===state.loadVersion)setStatus('이미지 읽기 실패: '+e.message,'error');}
   }
-  function packMask(mask){const out=[mask[0]||0];let value=mask[0]||0,run=0;for(let i=0;i<mask.length;i++){const v=mask[i]?1:0;if(v===value)run++;else{let n=run;while(n>=128){out.push((n%128)|128);n=Math.floor(n/128);}out.push(n);value=v;run=1;}}let n=run;while(n>=128){out.push((n%128)|128);n=Math.floor(n/128);}out.push(n);return Uint8Array.from(out);}
-  function unpackMask(bytes,length){const out=new Uint8Array(length);let value=bytes[0]||0,i=1,pos=0;while(i<bytes.length&&pos<length){let n=0,mul=1,b;do{b=bytes[i++];n+=(b&127)*mul;mul*=128;}while((b&128)&&i<bytes.length);out.fill(value,pos,Math.min(length,pos+n));pos+=n;value=value?0:1;}return out;}
+  // RLE lives in rle.js now; keep the local names for call sites.
+  const {packMask,unpackMask}=OutlineRle;
   function blobFromCanvas(canvas){return new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(new Error('이미지 압축 실패')),'image/png'));}
-  async function saveBatchCurrent(){if(batchIndex<0||!state.mask||!state.artCanvas)return;const pixels=state.w*state.h;batchResults[batchIndex]={name:batchFiles[batchIndex]?.name||state.sourceName,sourceName:state.sourceName,w:state.w,h:state.h,ppm:state.ppm,maskRle:packMask(state.mask),autoRle:packMask(state.autoMask||state.mask),artBlob:await blobFromCanvas(state.artCanvas),whitePaths:JSON.parse(JSON.stringify(state.whitePaths)),whiteAreaMm2:state.whiteAreaMm2,metrics:JSON.parse(JSON.stringify(state.metrics||{})),outputName:els.outputName.value,customFileName:state.customFileName,dirty:state.dirty,history:state.history.map(packMask),file:batchFiles[batchIndex],pixels};renderBatchQueue();}
-  async function restoreBatchItem(index){const r=batchResults[index];if(!r)return;batchIndex=index;state.sourceName=r.sourceName;state.file=r.file;state.w=r.w;state.h=r.h;state.ppm=r.ppm;state.mask=unpackMask(r.maskRle,r.pixels);state.autoMask=unpackMask(r.autoRle,r.pixels);state.artCanvas=document.createElement('canvas');const bmp=await createImageBitmap(r.artBlob);state.artCanvas.width=r.w;state.artCanvas.height=r.h;state.artCanvas.getContext('2d').drawImage(bmp,0,0);bmp.close();state.overlayCanvas=document.createElement('canvas');state.overlayCanvas.width=r.w;state.overlayCanvas.height=r.h;state.whitePaths=JSON.parse(JSON.stringify(r.whitePaths));state.whiteAreaMm2=r.whiteAreaMm2;state.metrics=JSON.parse(JSON.stringify(r.metrics));state.dirty=r.dirty;state.history=r.history.map(x=>unpackMask(x,r.pixels));state.customFileName=r.customFileName;els.outputName.value=r.outputName;els.fileMeta.classList.remove('hidden');els.fileMeta.innerHTML=`<b>${escapeHtml(r.name)}</b><br>배치 결과 ${index+1}/${batchFiles.length}`;els.processBtn.disabled=false;setEnabled(!state.dirty);render();refreshMetrics();setFlowStage(2);renderBatchQueue();}
-  function renderBatchQueue(){const bar=$('batchQueueBar'),btn=$('batchProcessBtn');if(!bar)return;const many=batchFiles.length>1;bar.classList.toggle('hidden',!many);btn.classList.toggle('hidden',!many);btn.disabled=batchBusy||!many;btn.textContent=batchBusy?'배치 처리 중…':`전체 ${batchFiles.length}개 처리`;if(!many){bar.innerHTML='';return;}bar.innerHTML=`<div class="batch-head"><b>이미지 배치</b><span>${batchResults.filter(Boolean).length}/${batchFiles.length} 처리 완료</span></div><div class="batch-items">${batchFiles.map((f,i)=>`<button type="button" class="batch-item ${i===batchIndex?'active':''} ${batchResults[i]?'done':''}" data-batch-index="${i}" title="${escapeHtml(f.name)}"><span>${batchResults[i]?'✓':String(i+1).padStart(2,'0')}</span>${escapeHtml(f.name)}</button>`).join('')}</div><small>공통 설정 · 결과는 목록에서 하나씩 미리보기/편집하고 각자 내보냅니다.</small>`;bar.querySelectorAll('[data-batch-index]').forEach(b=>{b.disabled=batchBusy;b.addEventListener('click',async()=>{const i=Number(b.dataset.batchIndex);if(i===batchIndex)return;if(state.mask&&batchIndex>=0)await saveBatchCurrent();batchIndex=i;if(batchResults[i])await restoreBatchItem(i);else{state.customFileName=false;await loadFile(batchFiles[i]);setFlowStage(1);renderBatchQueue();}});});}
-  async function processBatch(){if(batchBusy||batchFiles.length<2)return;batchBusy=true;$('batchProcessBtn').disabled=true;renderBatchQueue();try{for(let i=0;i<batchFiles.length;i++){if(batchResults[i])continue;batchIndex=i;state.customFileName=false;setStatus(`배치 처리 ${i+1}/${batchFiles.length} · ${batchFiles[i].name}`,'busy');await loadFile(batchFiles[i]);if(!state.file||!state.croppedCanvas){batchResults[i]={name:batchFiles[i].name,error:'이미지 알파 또는 디코딩 오류',file:batchFiles[i]};renderBatchQueue();continue;}await processPipeline();if(state.mask)await saveBatchCurrent();else{batchResults[i]={name:batchFiles[i].name,error:els.status.textContent,file:batchFiles[i]};renderBatchQueue();}}
-    const first=batchResults.findIndex(Boolean);if(first>=0&&batchResults[first].maskRle)await restoreBatchItem(first);setStatus(`배치 완료 · ${batchResults.filter(r=>r?.maskRle).length}/${batchFiles.length}개 결과 준비됨`);setFlowStage(2);
+  async function saveBatchInto(index){
+    if(!batchStore.inRange(index)||!state.mask||!state.artCanvas)return;
+    // Capture the whole item synchronously. The await below must never re-read
+    // `state`, otherwise a tab switch mid-save mixes two items together.
+    const snapshot={name:batchFiles[index]?.name||state.sourceName,sourceName:state.sourceName,w:state.w,h:state.h,ppm:state.ppm,maskRle:packMask(state.mask),autoRle:packMask(state.autoMask||state.mask),whitePaths:JSON.parse(JSON.stringify(state.whitePaths)),whiteAreaMm2:state.whiteAreaMm2,metrics:JSON.parse(JSON.stringify(state.metrics||{})),outputName:els.outputName.value,customFileName:state.customFileName,dirty:state.dirty,history:state.history.map(packMask),file:batchFiles[index],pixels:state.w*state.h};
+    const canvas=state.artCanvas;
+    snapshot.artBlob=await blobFromCanvas(canvas);
+    batchStore.put(index,snapshot);
+    renderBatchQueue();
+  }
+  async function restoreBatchItem(index){
+    const r=batchStore.get(index);if(!r)return;batchStore.setActive(index);
+    // RenderState stages the whole item, then publishes it in one step. If the
+    // user clicks again while we decode, the older commit is dropped instead of
+    // publishing a mask next to another item's white paths.
+    await renderState.commit(async()=>{
+      const bmp=await createImageBitmap(r.artBlob);
+      const artCanvas=document.createElement('canvas');artCanvas.width=r.w;artCanvas.height=r.h;artCanvas.getContext('2d').drawImage(bmp,0,0);bmp.close();
+      const overlayCanvas=document.createElement('canvas');overlayCanvas.width=r.w;overlayCanvas.height=r.h;
+      return {sourceName:r.sourceName,file:r.file,w:r.w,h:r.h,ppm:r.ppm,mask:unpackMask(r.maskRle,r.pixels),autoMask:unpackMask(r.autoRle||r.maskRle,r.pixels),artCanvas,overlayCanvas,whitePaths:JSON.parse(JSON.stringify(r.whitePaths)),whiteAreaMm2:r.whiteAreaMm2,metrics:JSON.parse(JSON.stringify(r.metrics)),dirty:r.dirty,history:r.history.map(x=>unpackMask(x,r.pixels)),customFileName:r.customFileName};
+    });
+    if(batchStore.active!==index)return;
+    els.outputName.value=r.outputName;els.fileMeta.classList.remove('hidden');els.fileMeta.innerHTML=`<b>${escapeHtml(r.name)}</b><br>배치 결과 ${index+1}/${batchFiles.length}`;
+    els.processBtn.disabled=false;setEnabled(!state.dirty);render();refreshMetrics();updateWhiteInfo();setFlowStage(2);renderBatchQueue();
+  }
+  function renderBatchQueue(){
+    const bar=$('batchQueueBar'),btn=$('batchProcessBtn');if(!bar)return;
+    const many=batchFiles.length>1;bar.classList.toggle('hidden',!many);btn.classList.toggle('hidden',!many);
+    btn.disabled=batchBusy||!many;btn.textContent=batchBusy?'배치 처리 중…':`전체 ${batchFiles.length}개 처리`;
+    if(!many){bar.innerHTML='';return;}
+    const active=batchStore.active;
+    bar.innerHTML=`<div class="batch-head"><b>이미지 배치</b><span>${batchStore.completedCount()}/${batchFiles.length} 처리 완료</span></div><div class="batch-items">${batchFiles.map((f,i)=>`<button type="button" class="batch-item ${i===active?'active':''} ${batchStore.has(i)?'done':''}" data-batch-index="${i}" title="${escapeHtml(f.name)}"><span>${batchStore.has(i)?'✓':String(i+1).padStart(2,'0')}</span>${escapeHtml(f.name)}</button>`).join('')}</div><small>공통 설정 · 결과는 목록에서 하나씩 미리보기/편집하고 각자 내보냅니다.</small>`;
+    bar.querySelectorAll('[data-batch-index]').forEach(b=>{
+      b.disabled=batchBusy;
+      b.addEventListener('click',()=>withEditor(()=>selectBatchItem(Number(b.dataset.batchIndex))));
+    });
+  }
+  async function selectBatchItem(i){
+    if(i===batchStore.active)return;
+    if(state.mask&&batchStore.active>=0)await saveBatchInto(batchStore.active);
+    if(batchStore.has(i)){await restoreBatchItem(i);return;}
+    batchStore.setActive(i);state.customFileName=false;
+    await loadFile(batchFiles[i],i);
+    setFlowStage(1);renderBatchQueue();
+  }
+
+  async function processBatch(){if(batchBusy||batchFiles.length<2)return;batchBusy=true;$('batchProcessBtn').disabled=true;renderBatchQueue();
+    const gen=batchGeneration;const files=batchFiles.slice();
+    try{
+    if(state.mask&&batchStore.active>=0)await saveBatchInto(batchStore.active);
+    for(let i=0;i<files.length;i++){
+      if(gen!==batchGeneration){setStatus('새 이미지 목록으로 교체되어 배치를 중단했습니다.');break;}
+      if(batchStore.has(i))continue;
+      state.customFileName=false;setStatus(`배치 처리 ${i+1}/${files.length} · ${files[i].name}`,'busy');
+      // Each item is isolated: one bad file must never take the batch down.
+      try{
+        await loadFile(files[i],i);
+        if(!state.file||!state.croppedCanvas)throw new Error('이미지 알파 또는 디코딩 오류');
+        await processPipeline();
+        if(!state.mask)throw new Error(els.status.textContent||'결과를 만들지 못했습니다.');
+        if(gen===batchGeneration)await saveBatchInto(i);
+      }catch(err){
+        if(gen===batchGeneration)batchStore.put(i,{name:files[i].name,error:err&&err.message?err.message:String(err),file:files[i]});
+      }
+      renderBatchQueue();
+    }
+    if(gen!==batchGeneration)return;
+    const first=files.findIndex((f,i)=>batchStore.get(i)?.maskRle);if(first>=0)await restoreBatchItem(first);
+    const ready=files.filter((f,i)=>batchStore.get(i)?.maskRle).length;
+    setStatus(`배치 완료 · ${ready}/${files.length}개 결과 준비됨`);setFlowStage(2);
   }finally{batchBusy=false;renderBatchQueue();}}
   function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
@@ -485,9 +570,10 @@
   $('workflowStep1').addEventListener('click',()=>setFlowStage(1));
   $('workflowStep2').addEventListener('click',()=>{if(!$('workflowStep2').disabled)setFlowStage(2);});
   document.querySelectorAll('.layer-toggle').forEach(btn=>btn.addEventListener('click',()=>{const layer=btn.dataset.layer,key=layer==='art'?'showArt':layer==='white'?'showWhite':'showCut';state[key]=!state[key];if(layer==='white')els.whitePreview.checked=state.showWhite;btn.classList.toggle('active',state[key]);btn.setAttribute('aria-pressed',String(state[key]));btn.querySelector('.eye').textContent=state[key]?'◉':'○';render();}));
-  els.fileInput.addEventListener('change',async e=>{const files=Array.from(e.target.files||[]);e.target.value='';if(!files.length)return;batchFiles=files;batchResults=new Array(files.length);batchIndex=0;state.customFileName=false;renderBatchQueue();await loadFile(files[0]);});
-  els.processBtn.addEventListener('click',async()=>{await processPipeline();if(batchIndex>=0&&batchFiles.length>1&&state.mask)await saveBatchCurrent();});
-  $('batchProcessBtn').addEventListener('click',processBatch);
+  els.fileInput.addEventListener('change',async e=>{const files=Array.from(e.target.files||[]);e.target.value='';if(!files.length)return;batchGeneration++;   // stop any running batch immediately
+   withEditor(async()=>{batchFiles=files;batchStore.reset(files.length);batchStore.setActive(0);state.customFileName=false;renderBatchQueue();await loadFile(files[0],0);});});
+  els.processBtn.addEventListener('click',()=>withEditor(async()=>{await processPipeline();if(batchStore.active>=0&&batchFiles.length>1&&state.mask)await saveBatchInto(batchStore.active);}));
+  $('batchProcessBtn').addEventListener('click',()=>withEditor(processBatch));
   els.brushTool.addEventListener('click',()=>setTool('brush'));els.eraserTool.addEventListener('click',()=>setTool('eraser'));
   els.brushSize.addEventListener('input',()=>{els.brushSizeText.value=Number(els.brushSize.value).toFixed(1).replace(/\.0$/,'')+' mm';render();});
   els.undoBtn.addEventListener('click',undo);els.resetEditsBtn.addEventListener('click',resetEdits);els.fitBtn.addEventListener('click',()=>{els.canvas.style.maxWidth='100%';els.canvas.style.maxHeight='100%';});
@@ -508,6 +594,6 @@
   window.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();undo();}});
   for(const ev of ['dragenter','dragover'])els.dropZone.addEventListener(ev,e=>{e.preventDefault();els.dropZone.classList.add('dragover');});
   for(const ev of ['dragleave','drop'])els.dropZone.addEventListener(ev,e=>{e.preventDefault();els.dropZone.classList.remove('dragover');});
-  els.dropZone.addEventListener('drop',e=>loadFile(e.dataTransfer.files?.[0]));
+  els.dropZone.addEventListener('drop',e=>{const f=e.dataTransfer.files?.[0];if(!f)return;batchGeneration++;withEditor(async()=>{batchFiles=[f];batchStore.reset(1);batchStore.setActive(0);await loadFile(f,0);});});
   $('brushSizeText').value='10 mm';
 })();
