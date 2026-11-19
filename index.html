@@ -8,6 +8,9 @@
   <script defer src="vendor/clipper.js"></script>
   <script defer src="pdf.js"></script>
   <script defer src="scaffold-rules.js"></script>
+  <script defer src="nesting-geometry.js"></script>
+  <script defer src="nesting.js"></script>
+  <script defer src="pdf-import.js"></script>
   <script defer src="app.js"></script>
 </head>
 <body data-flow-stage="1">
@@ -93,8 +96,35 @@
         <input id="outputName" class="field-control filename-control" type="text" value="outline-studio" maxlength="120" autocomplete="off" />
         <div class="export-buttons"><button id="pdfBtn" class="export-primary" disabled>PDF · 인쇄 스팟</button><button id="svgBtn" disabled>SVG 벡터</button><button id="pngBtn" disabled>PNG 미리보기</button><button id="jsonBtn" disabled>검사 JSON</button></div>
         <p class="micro-note">PDF에는 화이트와 칼선이 별색 분판으로 저장됩니다. SVG·PNG는 스팟 분판이 아닌 미리보기입니다.</p>
+        <p class="micro-note">레이어: PDF의 Artwork/White/Cutline은 Acrobat·RIP용 OCG입니다. Illustrator는 PDF 레이어를 그대로 가져오지 않아 1레이어로 보입니다. Illustrator에서 3레이어로 쓰려면 SVG를 열어 Object → Release to Layers (Build)를 실행하세요.</p>
         <p class="micro-note">일반 PDF 뷰어에서는 화이트가 그림을 가릴 수 있습니다. Acrobat 또는 RIP의 오버프린트·분판 미리보기로 확인하세요.</p>
         <p class="micro-note">원본 색상은 RGB로 유지됩니다. 실제 출력 전 RIP에서 스팟 이름과 화이트 인쇄 순서를 확인하세요.</p>
+        <div class="setting-row"><label for="baseTolerance">베이스 슬릿 공차</label><div class="input-with-unit"><input id="baseTolerance" type="number" min="0" max="2.9" step="0.1" value="0.3"/><span>mm</span></div></div>
+        <p class="micro-note">35 × 35 mm · R3 · 슬릿 33 mm × (3 mm − 공차) · 45°</p>
+        <button id="baseSvgBtn" type="button">슬릿 베이스 SVG 저장</button>
+        <div class="nesting-box">
+          <div class="nesting-head"><strong>네스팅 시트 · 400 × 300 mm</strong><span id="nestingInfo">배치 결과 기준</span></div>
+          <p class="micro-note">처리된 이미지를 한 장에 배치합니다. 기존 이미지별 PDF는 그대로 유지되고, 네스팅은 별도 PDF로 저장됩니다. 남는 공간에는 35 × 35 mm 슬릿 베이스가 채워집니다.</p>
+          <ul class="micro-note nesting-rules">
+            <li>1행은 (1, 1)에서 시작해 <b>x = 399 mm</b>에서 끝나고, 넘치면 다음 행은 x = 1에서 이어집니다 (y = 299에서 마지막).</li>
+            <li>모든 아이템은 <b>긴 변이 세로</b>가 되게 정렬하고, 순서와 180° 회전을 바꿔가며 <b>가장 많이 들어가는 행</b>을 찾습니다.</li>
+            <li>간격은 바운딩 박스가 아니라 <b>실제 칼선 외곽선</b> 기준 0.25 mm입니다. 요철이 있으면 서로 물려 들어갑니다.</li>
+          </ul>
+          <label class="check-row" for="nestingBaseFill"><input id="nestingBaseFill" type="checkbox" checked /> 빈 공간에 슬릿 베이스 채우기</label>
+          <div class="nesting-buttons"><button id="nestingPreviewBtn" type="button">네스팅 미리보기</button><button id="nestingPdfBtn" type="button" class="export-primary">네스팅 시트 PDF 저장</button></div>
+          <div id="nestingPreview" class="nesting-preview hidden" aria-live="polite"></div>
+          <p id="nestingStatus" class="micro-note" aria-live="polite"></p>
+          <div class="pdf-import">
+            <div class="nesting-head"><strong>완성된 PDF 추가</strong><span id="pdfImportCount">0개</span></div>
+            <p class="micro-note">이미 완성된 개별 PDF를 네스팅에 추가합니다. 페이지 크기를 실제 칼선 크기로 읽고, 아트워크 이미지·화이트·칼선을 PDF 안에서 그대로 가져와 배치합니다. PNG 파이프라인을 거치지 않습니다.</p>
+            <label class="pdf-drop" for="pdfImportInput">
+              <input id="pdfImportInput" type="file" accept="application/pdf,.pdf" multiple />
+              <span>PDF 끌어놓기 / 선택</span>
+            </label>
+            <ul id="pdfImportList" class="pdf-import-list" aria-live="polite"></ul>
+            <div class="nesting-buttons single"><button id="pdfImportClear" type="button">가져온 PDF 비우기</button></div>
+          </div>
+        </div>
       </section>
       <footer class="side-foot">No accounts · No network calls · Local file processing</footer>
     </aside>

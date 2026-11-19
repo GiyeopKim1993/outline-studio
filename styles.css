@@ -31,3 +31,27 @@ body[data-flow-stage="2"] .sidebar>.card:not(.export-card),body[data-flow-stage=
 .layer-toggle.active{background:#f0f5ff;color:#315fd8;border-color:#c4d2fa}.layer-toggle .eye{font-size:14px;line-height:1;color:#8795a9}.layer-toggle.active .eye{color:#315fd8}
 @media(max-width:760px){.workflow-step{font-size:10px;padding:10px 5px}.layer-toggles{border-left:0;padding-left:0;width:100%;justify-content:flex-end}body[data-flow-stage="1"] .sidebar{display:flex}.workflow-nav{order:-1}}
 .batch-process-button{width:100%;margin-top:10px;padding:10px;border:1px solid #b9c9f8;border-radius:9px;background:#eef3ff;color:#315fd8;font-size:11px;font-weight:800}.batch-queue-bar{grid-column:1/-1;padding:12px 14px;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 3px 12px rgba(30,46,75,.025)}.batch-head{display:flex;align-items:center;justify-content:space-between;color:#40546e;font-size:11px}.batch-head span,.batch-queue-bar>small{color:#8290a2;font-size:10px}.batch-items{display:flex;gap:6px;overflow-x:auto;padding:9px 0 5px}.batch-item{flex:none;max-width:210px;display:flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:#fbfcfe;color:#5d6b7d;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.batch-item span{font-weight:800;color:#7a8aa0}.batch-item.done span{color:#15976f}.batch-item.active{border-color:#8da7f0;background:#edf3ff;color:#315fd8}.batch-queue-bar>small{display:block}
+/* Nesting sheet (400x300mm) preview + export */
+.nesting-box{margin-top:14px;padding:11px 12px;border:1px solid #dbe6f6;border-radius:10px;background:#f7faff}
+.nesting-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.nesting-head strong{color:#40546e;font-size:11px}
+.nesting-head span{font-size:10px;font-weight:700;color:#537ae5}
+.nesting-buttons{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:10px}
+.nesting-buttons button{border:1px solid var(--line);border-radius:8px;background:#fbfcff;height:34px;font-size:10px;color:#4c5a70;font-weight:700}
+.nesting-buttons button:hover{border-color:#9db3f4;color:var(--blue);background:#f5f7ff}
+.nesting-buttons button.export-primary{background:#edf3ff;border-color:#bed0ff;color:#2e5fdc}
+.nesting-preview{margin-top:10px;border:1px solid var(--line);border-radius:8px;background:#fff;padding:6px;overflow:hidden}
+.nesting-preview svg{display:block;width:100%;height:auto}
+.nesting-rules{margin:8px 0 0;padding-left:15px;line-height:1.55}
+.nesting-rules li{margin:3px 0}
+.nesting-rules b{color:#40546e}
+.pdf-import{margin-top:12px;padding-top:11px;border-top:1px dashed #dbe6f6}
+.pdf-drop{display:flex;align-items:center;justify-content:center;margin-top:8px;border:1px dashed #b9cdf2;border-radius:8px;background:#fbfcff;height:38px;cursor:pointer;font-size:10px;font-weight:700;color:#4c5a70}
+.pdf-drop:hover{border-color:#8fa9ee;color:var(--blue);background:#f5f7ff}
+.pdf-drop input{display:none}
+.pdf-import-list{margin:8px 0 0;padding:0;list-style:none;display:grid;gap:4px}
+.pdf-import-list li{display:flex;justify-content:space-between;gap:6px;font-size:9.5px;color:#4c5a70;background:#f7faff;border:1px solid #e3ecfa;border-radius:6px;padding:4px 6px}
+.pdf-import-list li b{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pdf-import-list li span{color:#8a97a9;white-space:nowrap}
+.pdf-import-list li.err{background:#fff5f5;border-color:#f6d3d3;color:#c04545}
+.nesting-buttons.single{grid-template-columns:1fr}

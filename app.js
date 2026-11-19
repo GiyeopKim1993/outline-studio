@@ -13,6 +13,7 @@
   };
   const state={file:null,sourceBitmap:null,artCanvas:null,overlayCanvas:null,w:0,h:0,ppm:0,artMask:null,whitePaths:[],whiteAreaMm2:0,autoMask:null,mask:null,tool:'brush',painting:false,lastPoint:null,history:[],metrics:null,sourceName:'',cursor:null,dirty:false,customFileName:false,busy:false,loadVersion:0,showArt:true,showWhite:true,showCut:true};
   let batchFiles=[],batchResults=[],batchIndex=-1,batchBusy=false;
+  const pdfNestingItems=[];
   const DPI=300, PAD_MM=10, MIN_CORE_MM2=25, WHITE_CHOKE_MM=0.15;
   let toastTimer=0;
 
@@ -329,8 +330,8 @@
     if(!state.mask||state.dirty)return;setStatus('SVG 벡터 경로 생성 중…','busy');setTimeout(()=>{try{
       const names=spotNames(),box=exportCrop(),cut=pathsToSvg(shiftPaths(boundaryLoops(state.mask,state.w,state.h),box)),white=pathsToSvg(shiftPaths(state.whitePaths,box));
       const width=box.width/state.ppm,height=box.height/state.ppm,art=cropCanvas(state.artCanvas,box),artUrl=art.toDataURL('image/png');
-      const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${width.toFixed(4)}mm" height="${height.toFixed(4)}mm" viewBox="0 0 ${box.width} ${box.height}"><metadata>SVG spot names are labels only. Use the PDF for real Separation color spaces.</metadata><g id="white-spot" data-spot-name="${escapeHtml(names.white)}"><path d="${white}" fill="#ffffff" fill-rule="evenodd"/></g><image x="0" y="0" width="${box.width}" height="${box.height}" href="${artUrl}"/><g id="cutline-spot" data-spot-name="${escapeHtml(names.cut)}"><path d="${cut}" fill="none" stroke="#f21a9b" stroke-width="${(0.2*state.ppm).toFixed(3)}" stroke-linejoin="round" stroke-linecap="round"/></g></svg>`;
-      download(filenameStem(els.outputName.value)+'.svg',new Blob([svg],{type:'image/svg+xml'}));setStatus('SVG 다운로드 완료 · 스팟 분판은 PDF를 사용하세요.');
+      const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${width.toFixed(4)}mm" height="${height.toFixed(4)}mm" viewBox="0 0 ${box.width} ${box.height}"><metadata>SVG spot names are labels only. Use the PDF for real Separation color spaces. Illustrator: open SVG then Object &gt; Release to Layers (Build) to split Artwork/White/Cutline groups into layers. PDF OCG layers show in Acrobat, not as Illustrator layers.</metadata><g id="Artwork"><image x="0" y="0" width="${box.width}" height="${box.height}" href="${artUrl}"/></g><g id="White" data-spot-name="${escapeHtml(names.white)}"><path d="${white}" fill="#ffffff" fill-rule="evenodd"/></g><g id="Cutline" data-spot-name="${escapeHtml(names.cut)}"><path d="${cut}" fill="none" stroke="#f21a9b" stroke-width="${(0.2*state.ppm).toFixed(3)}" stroke-linejoin="round" stroke-linecap="round"/></g></svg>`;
+      download(filenameStem(els.outputName.value)+'.svg',new Blob([svg],{type:'image/svg+xml'}));setStatus('SVG 다운로드 완료 · Illustrator에서 Release to Layers로 3레이어 분리하세요.');
     }catch(e){console.error(e);setStatus('SVG 생성 실패: '+e.message,'error');toast(e.message);}},30);
   }
   async function exportPdf(){
@@ -347,6 +348,110 @@
   }
   function exportPng(){if(!state.mask||state.dirty)return;const box=exportCrop(),c=document.createElement('canvas');c.width=box.width;c.height=box.height;const ctx=c.getContext('2d');ctx.beginPath();appendCanvasPaths(ctx,shiftPaths(state.whitePaths,box));ctx.fillStyle='#fff';ctx.fill('evenodd');ctx.drawImage(state.artCanvas,box.left,box.top,box.width,box.height,0,0,box.width,box.height);const loops=shiftPaths(boundaryLoops(state.mask,state.w,state.h),box);ctx.beginPath();appendCanvasPaths(ctx,loops);ctx.strokeStyle='#f21a9b';ctx.lineWidth=Math.max(2,.2*state.ppm);ctx.lineJoin='round';ctx.stroke();c.toBlob(b=>{if(b)download(filenameStem(els.outputName.value)+'.png',b);else toast('PNG 생성에 실패했습니다.');},'image/png');}
   function exportJson(){if(!state.mask||state.dirty)return;const current=maskStats();const white=els.whiteSwatch.value==='custom'?els.whiteCustom.value.trim():els.whiteSwatch.value;const report={...state.metrics,source:state.sourceName,actualCutSizeMm:[current.width/state.ppm,current.height/state.ppm],connectedComponents:current.components,internalHoles:current.holes,manualEdits:state.history.length>0,whiteSpotName:white,cutSpotName:els.cutSwatch.value.trim(),clientOnly:true};download(filenameStem(els.outputName.value)+'.json',new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));}
+  function cropBoxFor(mask,w,h){let minX=w,minY=h,maxX=-1,maxY=-1;for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(mask[y*w+x]){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}if(maxX<minX)throw new Error('칼선 경계가 비어 있습니다.');const left=Math.max(0,minX-1),top=Math.max(0,minY-1),right=Math.min(w,maxX+2),bottom=Math.min(h,maxY+2);return {left,top,width:right-left,height:bottom-top};}
+  async function canvasFromBlob(blob,w,h){const bmp=await createImageBitmap(blob);const c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(bmp,0,0);bmp.close();return c;}
+  // PDFs imported through "완성된 PDF 추가" are cached items that skip the
+  // PNG pipeline entirely; they already carry artwork + white + cut paths.
+  async function importFinishedPdfs(files){
+    if(!files||!files.length)return;
+    const list=$('pdfImportList');
+    for(const file of files){
+      if(!/\.pdf$/i.test(file.name)&&file.type!=='application/pdf'){toast(`${file.name}: PDF가 아닙니다.`);continue;}
+      setStatus(`${file.name} 읽는 중…`,'busy');
+      try{
+        const buffer=await file.arrayBuffer();
+        const item=await window.OutlinePdfImport.toNestingItem(buffer,{name:filenameStem(file.name),pixelsPerMm:12});
+        pdfNestingItems.push({...item,fileName:file.name,importedAt:Date.now()});
+        setStatus(`${file.name} 추가됨 · ${item.widthMm.toFixed(1)} × ${item.heightMm.toFixed(1)} mm`);
+      }catch(e){
+        console.error(e);
+        pdfNestingItems.push({name:filenameStem(file.name),error:e.message,fileName:file.name});
+        setStatus(`${file.name} 실패: ${e.message}`,'error');
+      }
+    }
+    renderPdfImportList();
+  }
+  function renderPdfImportList(){
+    const list=$('pdfImportList'),count=$('pdfImportCount');
+    if(!list)return;
+    const ok=pdfNestingItems.filter(i=>!i.error),bad=pdfNestingItems.filter(i=>i.error);
+    if(count)count.textContent=`${ok.length}개${bad.length?` · 실패 ${bad.length}`:''}`;
+    list.innerHTML=pdfNestingItems.map((it)=>it.error
+      ?`<li class="err"><b>${escapeHtml(it.fileName||it.name)}</b><span>${escapeHtml(it.error)}</span></li>`
+      :`<li><b>${escapeHtml(it.name)}</b><span>${it.widthMm.toFixed(1)} × ${it.heightMm.toFixed(1)} mm</span></li>`).join('');
+  }
+  async function collectNestingItems(){
+    const items=[];
+    for(const pdf of pdfNestingItems){
+      if(pdf.error||!pdf.artwork)continue;
+      items.push(pdf);
+    }
+    if(batchFiles.length>1){
+      if(batchIndex>=0&&state.mask)await saveBatchCurrent();
+      for(let i=0;i<batchResults.length;i++){
+        const r=batchResults[i];if(!r||!r.maskRle)continue;
+        const mask=unpackMask(r.maskRle,r.pixels),box=cropBoxFor(mask,r.w,r.h);
+        const full=await canvasFromBlob(r.artBlob,r.w,r.h);
+        const artwork=cropCanvas(full,box);
+        const cutPaths=shiftPaths(boundaryLoops(mask,r.w,r.h),box),whitePaths=shiftPaths(r.whitePaths,box);
+        if(!cutPaths.length||!whitePaths.length)continue;
+        items.push({name:r.outputName||filenameStem(r.name||`item-${i+1}`),artwork,width:box.width,height:box.height,pixelsPerMm:r.ppm,whitePaths,cutPaths,widthMm:box.width/r.ppm,heightMm:box.height/r.ppm});
+      }
+    }else if(state.mask&&!state.dirty){
+      const box=exportCrop(),artwork=cropCanvas(state.artCanvas,box);
+      items.push({name:filenameStem(els.outputName.value),artwork,width:box.width,height:box.height,pixelsPerMm:state.ppm,whitePaths:shiftPaths(state.whitePaths,box),cutPaths:shiftPaths(boundaryLoops(state.mask,state.w,state.h),box),widthMm:box.width/state.ppm,heightMm:box.height/state.ppm});
+    }
+    if(!items.length)throw new Error('네스팅할 대상이 없습니다. 배치를 처리하거나 완성된 PDF를 추가하세요.');
+    return items;
+  }
+  function thumbnailDataUrl(canvas,maxW){
+    if(!canvas||!canvas.width)return null;
+    const w=Math.min(maxW||140,canvas.width),h=Math.max(1,Math.round(canvas.height*w/canvas.width));
+    const c=document.createElement('canvas');c.width=w;c.height=h;
+    const ctx=c.getContext('2d');ctx.imageSmoothingQuality='high';ctx.drawImage(canvas,0,0,w,h);
+    try{return c.toDataURL('image/png');}catch(_){return null;}
+  }
+  function nestingOptions(){return {sheetWidthMm:400,sheetHeightMm:300,marginMm:1,clearanceMm:0.25,fillBases:$('nestingBaseFill')?.checked!==false,baseSizeMm:35};}
+  function nestingSummary(result,total){
+    const pct=(result.utilization*100).toFixed(1);
+    const rows=(result.rows||[]).map(r=>`${r.count}개·끝 ${r.endXMm.toFixed(1)}`).join(' / ')||'-';
+    return `행 ${result.rowCount}개 [${rows}] · 배치 ${result.placements.length}/${total} · 베이스 ${result.bases.length}개 · 점유율 ${pct}% · 사용 높이 ${result.usedHeightMm.toFixed(1)} mm`;
+  }
+  async function previewNesting(){
+    const status=$('nestingStatus'),info=$('nestingInfo'),box=$('nestingPreview');
+    try{
+      setStatus('네스팅 배치 계산 중…','busy');
+      const items=await collectNestingItems();
+      const result=window.OutlineNesting.packNesting(items,nestingOptions());
+      const labels=items.map(it=>it.name);
+      const baseGeometry=window.OutlineNestingGeometry.createBaseGeometry(Number($('baseTolerance')?.value??0.3));
+      const thumbnails=items.map(it=>thumbnailDataUrl(it.artwork,160));
+      box.innerHTML=window.OutlineNesting.nestingPreviewSvg(result,{labels,baseGeometry,thumbnails});
+      box.classList.remove('hidden');
+      info.textContent='400 × 300 mm';
+      status.textContent=nestingSummary(result,items.length)+(result.unplaced.length?` · 미배치 ${result.unplaced.length}개: ${result.unplaced.map(u=>u.name).join(', ')}`:'');
+      setStatus('네스팅 미리보기 완료 · '+nestingSummary(result,items.length));
+    }catch(e){console.error(e);status.textContent='네스팅 미리보기 실패: '+e.message;toast(e.message);}
+  }
+  async function exportNestingPdf(){
+    const status=$('nestingStatus');
+    try{
+      const names=spotNames();
+      setStatus('네스팅 시트 PDF 생성 중…','busy');
+      const items=await collectNestingItems();
+      const result=window.OutlineNesting.packNesting(items,nestingOptions());
+      if(!result.placements.length)throw new Error('시트에 배치할 수 있는 이미지가 없습니다.');
+      const tolerance=Number($('baseTolerance')?.value??0.3);
+      const g=window.OutlineNestingGeometry.createBaseGeometry(tolerance);
+      const sheetItems=result.placements.map(p=>({...items[p._idx],xMm:p.xMm,yMm:p.yMm,widthMm:p.widthMm,heightMm:p.heightMm,rot:p.rot}));
+      const bases=result.bases.map(b=>({xMm:b.xMm,yMm:b.yMm,outer:g.outer,slit:g.slit}));
+      const blob=await OutlinePDF.createSheet({sheetWidthMm:400,sheetHeightMm:300,items:sheetItems,bases,whiteName:names.white,cutName:names.cut});
+      download(filenameStem(els.outputName.value)+'-nesting-400x300.pdf',blob);
+      const msg=nestingSummary(result,items.length)+(result.unplaced.length?` · 미배치 ${result.unplaced.length}개는 제외됨`:'');
+      status.textContent=msg;
+      setStatus('네스팅 시트 PDF 다운로드 완료 · '+msg);
+    }catch(e){console.error(e);status.textContent='네스팅 PDF 생성 실패: '+e.message;setStatus('네스팅 PDF 생성 실패: '+e.message,'error');toast(e.message);}
+  }
 
   async function loadFile(file){if(!file)return;if(state.busy){toast('처리가 끝난 뒤 새 이미지를 선택하세요.');return;}setFlowStage(1);$('workflowStep2').disabled=true;if(!/image\/(png|webp)/.test(file.type)){toast('투명 알파가 있는 PNG 또는 WEBP 이미지를 선택하세요.');return;}const loadVersion=++state.loadVersion;state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.history=[];state.metrics=null;state.dirty=false;setEnabled(false);updateWhiteInfo();resetScaffoldInfo();els.processBtn.disabled=true;state.file=file;state.sourceName=file.name;if(!state.customFileName)els.outputName.value=filenameStem(file.name.replace(/\.(?:png|webp)$/i,''));
     try{const bitmap=await createImageBitmap(file);if(loadVersion!==state.loadVersion){bitmap.close();return;}if(state.sourceBitmap)state.sourceBitmap.close();state.sourceBitmap=bitmap;const tmp=document.createElement('canvas');tmp.width=bitmap.width;tmp.height=bitmap.height;tmp.getContext('2d').drawImage(bitmap,0,0);const data=tmp.getContext('2d').getImageData(0,0,tmp.width,tmp.height).data;let minX=tmp.width,minY=tmp.height,maxX=-1,maxY=-1,hasTransparency=false;for(let y=0;y<tmp.height;y++)for(let x=0;x<tmp.width;x++){const a=data[(y*tmp.width+x)*4+3];if(a<250)hasTransparency=true;if(a>1){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}}
@@ -368,6 +473,15 @@
   }finally{batchBusy=false;renderBatchQueue();}}
   function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
+  $('baseSvgBtn')?.addEventListener('click',()=>{
+    try{
+      const g=window.OutlineNestingGeometry.createBaseGeometry(Number($('baseTolerance').value));
+      const d=(pts)=>pts.map((p,i)=>`${i?'L':'M'} ${p[0].toFixed(4)} ${p[1].toFixed(4)}`).join(' ')+' Z';
+      const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="35mm" height="35mm" viewBox="0 0 35 35"><title>35mm rounded base with diagonal slit</title><g id="Cutline" data-layer="cutline" fill="none" stroke="#ff00a8" stroke-width="0.2"><path d="${d(g.outer)}"/><path d="${d(g.slit)}"/></g><metadata>Base 35x35mm R3; slot ${g.slotLengthMm}x${g.slotWidthMm}mm at ${g.angleDeg} degrees. PDF layer separation must be checked in Acrobat/RIP; Illustrator may merge PDF OCGs.</metadata></svg>`;
+      download('35mm-slit-base.svg',new Blob([svg],{type:'image/svg+xml'}));
+      toast(`베이스 템플릿 저장 · 슬릿 폭 ${g.slotWidthMm.toFixed(1)} mm`);
+    }catch(e){toast(e.message);}
+  });
   $('workflowStep1').addEventListener('click',()=>setFlowStage(1));
   $('workflowStep2').addEventListener('click',()=>{if(!$('workflowStep2').disabled)setFlowStage(2);});
   document.querySelectorAll('.layer-toggle').forEach(btn=>btn.addEventListener('click',()=>{const layer=btn.dataset.layer,key=layer==='art'?'showArt':layer==='white'?'showWhite':'showCut';state[key]=!state[key];if(layer==='white')els.whitePreview.checked=state.showWhite;btn.classList.toggle('active',state[key]);btn.setAttribute('aria-pressed',String(state[key]));btn.querySelector('.eye').textContent=state[key]?'◉':'○';render();}));
@@ -378,6 +492,15 @@
   els.brushSize.addEventListener('input',()=>{els.brushSizeText.value=Number(els.brushSize.value).toFixed(1).replace(/\.0$/,'')+' mm';render();});
   els.undoBtn.addEventListener('click',undo);els.resetEditsBtn.addEventListener('click',resetEdits);els.fitBtn.addEventListener('click',()=>{els.canvas.style.maxWidth='100%';els.canvas.style.maxHeight='100%';});
   els.pdfBtn.addEventListener('click',exportPdf);els.svgBtn.addEventListener('click',exportSvg);els.pngBtn.addEventListener('click',exportPng);els.jsonBtn.addEventListener('click',exportJson);
+  $('nestingPreviewBtn')?.addEventListener('click',previewNesting);$('nestingPdfBtn')?.addEventListener('click',exportNestingPdf);
+  $('pdfImportInput')?.addEventListener('change',async(e)=>{const files=[...(e.target.files||[])];e.target.value='';await importFinishedPdfs(files);});
+  $('pdfImportClear')?.addEventListener('click',()=>{pdfNestingItems.length=0;renderPdfImportList();$('nestingPreview')?.classList.add('hidden');const st=$('nestingStatus');if(st)st.textContent='';toast('가져온 PDF를 비웠습니다.');});
+  const pdfDrop=$('pdfImportList')?.closest('.pdf-import');
+  if(pdfDrop){
+    ['dragover','dragenter'].forEach(ev=>pdfDrop.addEventListener(ev,(e)=>{e.preventDefault();pdfDrop.classList.add('dragover');}));
+    ['dragleave','drop'].forEach(ev=>pdfDrop.addEventListener(ev,(e)=>{e.preventDefault();pdfDrop.classList.remove('dragover');}));
+    pdfDrop.addEventListener('drop',async(e)=>{const files=[...(e.dataTransfer?.files||[])].filter(f=>/\.pdf$/i.test(f.name)||f.type==='application/pdf');if(files.length)await importFinishedPdfs(files);});
+  }
   els.whiteSwatch.addEventListener('change',()=>{const custom=els.whiteSwatch.value==='custom';els.whiteCustomWrap.classList.toggle('hidden',!custom);if(custom)els.whiteCustom.focus();});
   els.whitePreview.addEventListener('change',()=>{state.showWhite=els.whitePreview.checked;const btn=document.querySelector('.layer-toggle[data-layer="white"]');if(btn){btn.classList.toggle('active',state.showWhite);btn.setAttribute('aria-pressed',String(state.showWhite));btn.querySelector('.eye').textContent=state.showWhite?'◉':'○';}render();});els.outputName.addEventListener('input',()=>{state.customFileName=true;});
   ['offsetInput','heightInput','webInput','gapInput','tabWidthInput','tabDepthInput','taperInput','tipRadiusInput','speckInput','alphaInput'].forEach(id=>$(id).addEventListener('input',markPipelineDirty));
