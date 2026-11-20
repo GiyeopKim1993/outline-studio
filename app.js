@@ -395,6 +395,7 @@
         const buffer=await file.arrayBuffer();
         const item=await window.OutlinePdfImport.toNestingItem(buffer,{name:filenameStem(file.name),pixelsPerMm:12});
         pdfNestingItems.push({...item,fileName:file.name,importedAt:Date.now()});
+        syncSwatchFromImports();
         setStatus(`${file.name} 추가됨 · ${item.widthMm.toFixed(1)} × ${item.heightMm.toFixed(1)} mm`);
       }catch(e){
         console.error(e);
@@ -403,6 +404,7 @@
       }
     }
     renderPdfImportList();
+    renderSwatchReport();
   }
   function renderPdfImportList(){
     const list=$('pdfImportList'),count=$('pdfImportCount');
@@ -413,6 +415,65 @@
       ?`<li class="err"><b>${escapeHtml(it.fileName||it.name)}</b><span>${escapeHtml(it.error)}</span></li>`
       :`<li><b>${escapeHtml(it.name)}</b><span>${it.widthMm.toFixed(1)} × ${it.heightMm.toFixed(1)} mm</span></li>`).join('');
   }
+  // ---------------------------------------------------------------- swatch naming
+  // A nesting job is one PDF, so it can only carry one white spot and one cut
+  // spot. Files from different shops routinely disagree (`CutContour` vs `Cut`,
+  // `spot_0` vs `rdg_white`), and the sheet writer silently relabels everything
+  // with the app's own swatch names. That is invisible until the RIP runs, so the
+  // mismatch is surfaced here and can be adopted with one click.
+  function importedSpotReport(){
+    const ok=pdfNestingItems.filter(i=>!i.error);
+    const white=new Map(),cut=new Map();
+    for(const it of ok){
+      if(it.whiteSpot)white.set(it.whiteSpot,(white.get(it.whiteSpot)||0)+1);
+      if(it.cutSpot)cut.set(it.cutSpot,(cut.get(it.cutSpot)||0)+1);
+    }
+    const pick=(map)=>{let best=null,n=-1;for(const [k,v] of map)if(v>n){n=v;best=k;}return best;};
+    return {
+      count:ok.length,
+      whiteNames:[...white.entries()].map(([name,n])=>({name,n})).sort((a,b)=>b.n-a.n),
+      cutNames:[...cut.entries()].map(([name,n])=>({name,n})).sort((a,b)=>b.n-a.n),
+      whiteMajority:pick(white), cutMajority:pick(cut),
+    };
+  }
+  function currentWhiteName(){return (els.whiteSwatch.value==='custom'?els.whiteCustom.value:els.whiteSwatch.value).trim();}
+  function currentCutName(){return els.cutSwatch.value.trim();}
+  /** Adopt the names the imported files actually use, so the sheet matches them. */
+  function syncSwatchFromImports(){
+    const rep=importedSpotReport();
+    if(!rep.count)return;
+    let changed=false;
+    if(rep.whiteMajority&&rep.whiteMajority!==currentWhiteName()){
+      const opt=[...els.whiteSwatch.options].find(o=>o.value===rep.whiteMajority);
+      if(opt){els.whiteSwatch.value=rep.whiteMajority;els.whiteCustomWrap.classList.add('hidden');}
+      else{els.whiteSwatch.value='custom';els.whiteCustom.value=rep.whiteMajority;els.whiteCustomWrap.classList.remove('hidden');}
+      changed=true;
+    }
+    if(rep.cutMajority&&rep.cutMajority!==currentCutName()){els.cutSwatch.value=rep.cutMajority;changed=true;}
+    if(changed)renderSwatchReport();
+  }
+  /** Report mismatches between the chosen names and what the files contain. */
+  function renderSwatchReport(){
+    const box=$('swatchReport');
+    if(!box)return;
+    const rep=importedSpotReport();
+    if(!rep.count){box.textContent='';box.classList.add('hidden');return;}
+    const w=currentWhiteName(),c=currentCutName();
+    const others=[];
+    for(const e of rep.whiteNames)if(e.name!==w)others.push(`화이트 ‘${e.name}’ ${e.n}개`);
+    for(const e of rep.cutNames)if(e.name!==c)others.push(`칼선 ‘${e.name}’ ${e.n}개`);
+    box.classList.remove('hidden');
+    if(!others.length){
+      box.innerHTML=`<b>스와치 일치</b><span>가져온 ${rep.count}개 파일이 모두 화이트 ‘${escapeHtml(w)}’ · 칼선 ‘${escapeHtml(c)}’를 사용합니다.</span>`;
+      box.dataset.state='ok';
+      return;
+    }
+    box.innerHTML=`<b>스와치 불일치</b><span>시트 PDF는 화이트 ‘${escapeHtml(w)}’ · 칼선 ‘${escapeHtml(c)}’<b> 하나로만</b> 저장됩니다. 가져온 파일 중 ${escapeHtml(others.join(', '))}가 다릅니다.</span>`;
+    box.dataset.state='warn';
+  }
+  // Debug surface for the swatch reconciliation (same namespace as settingsKey):
+  // lets the reconciliation be driven and asserted without real file I/O.
+  try{window.__outlineDebug=Object.assign(window.__outlineDebug||{},{swatchReport:importedSpotReport,renderSwatchReport,unifySwatches:syncSwatchFromImports,setImportedItems(list){pdfNestingItems.length=0;for(const it of list)pdfNestingItems.push(it);renderPdfImportList();renderSwatchReport();}});}catch(_){ }
   async function collectNestingItems(){
     const items=[];
     for(const pdf of pdfNestingItems){
@@ -618,16 +679,18 @@
     else setStatus('이미지를 다시 불러오지 못했습니다.','error');
   });
   $('nestingPreviewBtn')?.addEventListener('click',previewNesting);$('nestingPdfBtn')?.addEventListener('click',exportNestingPdf);
+  $('swatchUnify')?.addEventListener('click',()=>{syncSwatchFromImports();renderSwatchReport();toast('가져온 PDF의 스와치 이름으로 통일했습니다.');});
   $('pdfImportInput')?.addEventListener('change',async(e)=>{const files=[...(e.target.files||[])];e.target.value='';await importFinishedPdfs(files);});
-  $('pdfImportClear')?.addEventListener('click',()=>{pdfNestingItems.length=0;renderPdfImportList();$('nestingPreview')?.classList.add('hidden');const st=$('nestingStatus');if(st)st.textContent='';toast('가져온 PDF를 비웠습니다.');});
+  $('pdfImportClear')?.addEventListener('click',()=>{pdfNestingItems.length=0;renderPdfImportList();renderSwatchReport();$('nestingPreview')?.classList.add('hidden');const st=$('nestingStatus');if(st)st.textContent='';toast('가져온 PDF를 비웠습니다.');});
   const pdfDrop=$('pdfImportList')?.closest('.pdf-import');
   if(pdfDrop){
     ['dragover','dragenter'].forEach(ev=>pdfDrop.addEventListener(ev,(e)=>{e.preventDefault();pdfDrop.classList.add('dragover');}));
     ['dragleave','drop'].forEach(ev=>pdfDrop.addEventListener(ev,(e)=>{e.preventDefault();pdfDrop.classList.remove('dragover');}));
     pdfDrop.addEventListener('drop',async(e)=>{const files=[...(e.dataTransfer?.files||[])].filter(f=>/\.pdf$/i.test(f.name)||f.type==='application/pdf');if(files.length)await importFinishedPdfs(files);});
   }
-  els.whiteSwatch.addEventListener('change',()=>{const custom=els.whiteSwatch.value==='custom';els.whiteCustomWrap.classList.toggle('hidden',!custom);if(custom)els.whiteCustom.focus();});
+  els.whiteSwatch.addEventListener('change',()=>{const custom=els.whiteSwatch.value==='custom';els.whiteCustomWrap.classList.toggle('hidden',!custom);if(custom)els.whiteCustom.focus();renderSwatchReport();});
   els.whitePreview.addEventListener('change',()=>{state.showWhite=els.whitePreview.checked;const btn=document.querySelector('.layer-toggle[data-layer="white"]');if(btn){btn.classList.toggle('active',state.showWhite);btn.setAttribute('aria-pressed',String(state.showWhite));btn.querySelector('.eye').textContent=state.showWhite?'◉':'○';}render();});els.outputName.addEventListener('input',()=>{state.customFileName=true;});
+  els.cutSwatch?.addEventListener('input',renderSwatchReport);els.whiteCustom?.addEventListener('input',renderSwatchReport);
   ['offsetInput','heightInput','webInput','gapInput','tabWidthInput','tabDepthInput','taperInput','tipRadiusInput','speckInput','alphaInput'].forEach(id=>$(id).addEventListener('input',markPipelineDirty));
   els.canvas.addEventListener('pointerdown',pointerDown);els.canvas.addEventListener('pointermove',pointerMove);els.canvas.addEventListener('pointerup',pointerUp);els.canvas.addEventListener('pointercancel',pointerUp);els.canvas.addEventListener('pointerleave',()=>{if(!state.painting){state.cursor=null;render();}});
   window.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();undo();}});

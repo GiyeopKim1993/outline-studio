@@ -684,7 +684,7 @@ async function inspect(arrayBuffer) {
   }
   const ops = parseContent(content);
   const xobjects = xobjectMap(resourcesDict(page, objects), objects);
-  const doc = { bytes, text, objects, page, widthMm, heightMm, ops, images: [], xobjects };
+  const doc = { bytes, text, objects, page, widthMm, heightMm, ops, images: [], xobjects, spots: collectSpotNames(text, page, objects) };
 
   // A finished artwork is usually wrapped in Form XObjects, one per layer
   // (`WhiteForm`, `RasterForm`, `OutlineForm` in our own writer, `/Fm0` etc.
@@ -697,6 +697,38 @@ async function inspect(arrayBuffer) {
   return Object.assign(doc, flat);
 }
 
+
+
+/**
+ * Every `/Separation` or `/DeviceN` name declared anywhere in the file, with the
+ * layers it appears on. Nested-sheet jobs need the individual PDFs to share one
+ * spot naming scheme, so this is what the app compares and rewrites.
+ */
+function collectSpotNames(text, page, objects) {
+  const found = new Map();
+  const add = (name, where) => {
+    if (!name) return;
+    const key = String(name);
+    if (!found.has(key)) found.set(key, { name: key, layers: new Set() });
+    found.get(key).layers.add(where);
+  };
+  // /Separation /Name ... and /DeviceN [/Name ...] ... anywhere in an object.
+  for (const [, obj] of objects) {
+    for (const m of obj.body.matchAll(/\/Separation\s*\/([^\s\/<>\[\]()]+)/g)) add(m[1], 'object');
+    for (const m of obj.body.matchAll(/\/DeviceN\s*\[\s*\/([^\s\/<>\[\]()]+)/g)) add(m[1], 'object');
+  }
+  return [...found.values()].map((v) => ({ name: v.name, layers: [...v.layers] }));
+}
+
+/**
+ * Resolve the layer an imported image belongs to, using the OCG names the file
+ * itself declares (`/OC /MCWhite BDC` points at an /OCG whose /Name is readable
+ * text such as "White spot: rdg_white"). Falls back to the marked-content tag.
+ */
+function resolveLayerName(mark, ocgNames) {
+  if (!mark) return null;
+  return ocgNames && ocgNames.get(mark) ? ocgNames.get(mark) : mark;
+}
 
 /**
  * Decide whether an image is the visible artwork or a production plate.
@@ -846,16 +878,49 @@ async function extractItemModel(arrayBuffer, options = {}) {
   const images = doc.images.map((im) => ({
     name: im.name, num: im.num, ctm: im.ctm, role: im.role || 'art', record: im.record, info: im.info, mark: im.mark,
   }));
+  // Which spot does this file use for its white plate and its cut line? A nested
+  // sheet has to settle on one naming scheme for the whole job, so report both.
+  const spots = doc.spots || [];
+  const spotNames = spots.map((sp) => sp.name);
+  const whitePlate = images.find((im) => im.role === 'white');
+  const whiteSpot = whitePlate && whitePlate.info.colorSpace && whitePlate.info.colorSpace.startsWith('[')
+    ? (doc.objects && whitePlateSpotName(doc, whitePlate)) : null;
 
   return {
     doc, ppm, W, H,
     widthMm: doc.widthMm,
     heightMm: doc.heightMm,
     cutPaths, whitePaths, images,
+    spots: spotNames,
+    whiteSpot: whiteSpot || null,
+    cutSpot: pickCutSpot(spots),
     userToPx,
     bytes: doc.bytes,
     text: doc.text,
   };
+}
+
+
+function whitePlateSpotName(doc, image) {
+  // The image's own colour space array names the spot: [/Separation /spot_0 ...]
+  const body = image.record && image.record.dict ? image.record.dict : '';
+  const m = /\/ColorSpace\s*\[\s*\/Separation\s*\/([^\s\/<>\[\]()]+)/.exec(body);
+  return m ? m[1] : null;
+}
+
+/**
+ * Pick the name this file uses for its cut line. Print shops are wildly
+ * inconsistent here (`CutContour`, `Cut`, `Die`, `Kiss`, `Through-cut`), so match
+ * on the usual words rather than an exact string, and fall back to the only spot
+ * that is not the white plate.
+ */
+function pickCutSpot(spots) {
+  const names = (spots || []).map((sp) => sp.name);
+  const cut = names.find((n) => /cut|die|kiss|through|outline/i.test(n));
+  if (cut) return cut;
+  const white = names.find((n) => /white|milk|opaque|spot_0/i.test(n));
+  const rest = names.filter((n) => n !== white);
+  return rest.length === 1 ? rest[0] : null;
 }
 
 // Convert a PDF into a nesting item: painted artwork canvas + cut/white paths in
@@ -932,13 +997,22 @@ async function toNestingItem(arrayBuffer, options = {}) {
     heightMm: model.heightMm,
     cutPaths: model.cutPaths,
     whitePaths: model.whitePaths,
+    // Which spot names this file uses, so a mixed job can be reconciled before the
+    // sheet is written with one naming scheme.
+    spots: model.spots,
+    whiteSpot: model.whiteSpot,
+    cutSpot: model.cutSpot,
     pageCount: model.doc.page ? 1 : 0,
     sourcePdf: true,
   };
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { inspect, extractItemModel, toNestingItem, parseContent, encodePng, PT_PER_MM, imageInfo };
+  module.exports = {
+    inspect, extractItemModel, toNestingItem, parseContent, encodePng, PT_PER_MM, imageInfo,
+    // Exposed for the naming tests only.
+    __test_pickCutSpot: pickCutSpot,
+  };
 }
 if (typeof window !== 'undefined') {
   window.OutlinePdfImport = { inspect, extractItemModel, toNestingItem, parseContent, encodePng, PT_PER_MM };

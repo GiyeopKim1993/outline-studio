@@ -55,3 +55,14 @@ body[data-flow-stage="2"] .sidebar>.card:not(.export-card),body[data-flow-stage=
 .pdf-import-list li span{color:#8a97a9;white-space:nowrap}
 .pdf-import-list li.err{background:#fff5f5;border-color:#f6d3d3;color:#c04545}
 .nesting-buttons.single{grid-template-columns:1fr}
+
+/* Spot-swatch reconciliation for imported print PDFs. A sheet can only carry one
+   white and one cut spot, so a mismatch has to be visible before the RIP runs. */
+.swatch-report{border:1px solid var(--line,#d8dee8);border-radius:10px;padding:10px 12px;margin:10px 0;font-size:12px;line-height:1.55;display:flex;flex-direction:column;gap:4px}
+.swatch-report.hidden{display:none}
+.swatch-report b{font-size:12px;letter-spacing:.01em}
+.swatch-report span{color:var(--ink-soft,#55607a)}
+.swatch-report[data-state="ok"]{border-color:#a7d7b5;background:#f2fbf5}
+.swatch-report[data-state="ok"] b{color:#1c7a42}
+.swatch-report[data-state="warn"]{border-color:#f0c48a;background:#fff8ee}
+.swatch-report[data-state="warn"] b{color:#a35a09}

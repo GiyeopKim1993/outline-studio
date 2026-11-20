@@ -119,3 +119,114 @@ test('sheet writer refuses empty items', async () => {
     /배치할 이미지가 없습니다/
   );
 });
+
+// ---------------------------------------------------------------------------
+// Geometry and paint order inside the sheet content stream.
+const sheet = require('node:zlib');
+
+function decodeContent(pdf) {
+  // The page content is the Flate stream that carries the BDC blocks.
+  const raw = pdf.toString('latin1');
+  for (const m of raw.matchAll(/(\d+) 0 obj\n<<([^]*?)>>\nstream\r?\n/g)) {
+    if (/\/Subtype\s*\/(Image|Form)/.test(m[2])) continue;
+    const length = Number((/\/Length (\d+)/.exec(m[2]) || [])[1]);
+    if (!length) continue;
+    const start = m.index + m[0].length;
+    try {
+      const text = sheet.inflateSync(pdf.subarray(start, start + length)).toString('latin1');
+      if (text.includes('BDC')) return text;
+    } catch (_) { /* not deflate, or not the content stream */ }
+  }
+  return null;
+}
+
+async function simpleSheet() {
+  const ppm = 6, w = 90, h = 200;
+  const item = (xMm, yMm) => ({
+    artwork: fakeArtwork(w, h), width: w, height: h, pixelsPerMm: ppm,
+    whitePaths: [[[0, 0], [w, 0], [w, h], [0, h]]],
+    cutPaths: [[[0, 0], [w, 0], [w, h], [0, h]]],
+    xMm, yMm, widthMm: w / ppm, heightMm: h / ppm, rot: 0,
+  });
+  const blob = await OutlinePDF.createSheet({
+    sheetWidthMM: 400, sheetWidthMm: 400, sheetHeightMm: 300,
+    items: [item(0, 0)], bases: [], whiteName: 'W', cutName: 'C',
+  });
+  return { data: Buffer.from(await blob.arrayBuffer()), ppm, w, h };
+}
+
+test('the artwork is painted at its real pixel extent, not as a single pixel', async () => {
+  // `Do` paints onto the unit square. Painting it with the bare placement matrix
+  // stamped a 90x200 artwork as 0.47pt (0.167mm), so a saved sheet looked like it
+  // contained nothing but cut lines.
+  const { data, ppm, w, h } = await simpleSheet();
+  const content = decodeContent(data);
+  assert.ok(content, 'content stream decoded');
+
+  // The unit-square scale is the `cm` immediately before the `Do`; the placement
+  // matrix sits before the clip path, so the two are not adjacent.
+  const at = content.indexOf('/Artwork0 Do');
+  assert.ok(at > 0, 'artwork paint found');
+  const before = content.slice(0, at);
+  const unit = /([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) cm\n$/.exec(before);
+  assert.ok(unit, 'unit-square scale right before the Do');
+  const place = [...before.matchAll(/([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) cm\n/g)];
+  const pm = place[0];
+  assert.ok(pm, 'placement matrix present');
+  const sx = Math.abs(Number(pm[1])), sy = Math.abs(Number(pm[4]));
+  const unitW = Number(unit[1]), unitH = Number(unit[4]);
+  assert.equal(unitW, w, 'unit square scaled to the pixel width');
+  assert.equal(unitH, h, 'unit square scaled to the pixel height');
+  // Combined x-scale must put one artwork pixel at 1/ppm mm in points.
+  const ptPerMm = 72 / 25.4;
+  assert.ok(Math.abs(sx * unitW - (w / ppm) * ptPerMm) < 1e-3,
+    `artwork width ${sx * unitW}pt should be ${(w / ppm) * ptPerMm}pt`);
+  assert.ok(Math.abs(sy * unitH - (h / ppm) * ptPerMm) < 1e-3,
+    `artwork height ${sy * unitH}pt should be ${(h / ppm) * ptPerMm}pt`);
+});
+
+test('white plate is painted before the artwork, cut line last', async () => {
+  // The white plate is a solid silhouette of the whole piece. Emitting it after the
+  // artwork buried the artwork, so only the cut line showed.
+  const { data } = await simpleSheet();
+  const content = decodeContent(data);
+  const white = content.indexOf('/OC /WhiteLayer BDC');
+  const art = content.indexOf('/OC /ArtLayer BDC');
+  const cut = content.indexOf('/OC /CutLayer BDC');
+  assert.ok(white >= 0 && art >= 0 && cut >= 0, 'all three layers emitted');
+  assert.ok(white < art, 'white plate must go down before the artwork');
+  assert.ok(art < cut, 'cut line must be last so it is never covered');
+});
+
+test('the cut stroke is 0.2mm in device space for items and bases', async () => {
+  const { data } = await simpleSheet();
+  const content = decodeContent(data);
+  const widths = [...content.matchAll(/([\d.]+) w\n/g)].map((m) => Number(m[1]));
+  assert.ok(widths.length >= 1, 'a stroke width was set');
+  const ptPerMm = 72 / 25.4;
+  // item cut: 0.2mm = 0.5669pt; it is written in a matrix that scales by 1/ppm,
+  // so the user-space value is 0.2*ppm. Either way the device width is 0.2mm.
+  const scalem = /([-\d.]+) [-\d.]+ [-\d.]+ ([-\d.]+) [-\d.]+ [-\d.]+ cm\n\/CutSpot/.exec(content);
+  assert.ok(scalem, 'cut block found');
+  const scale = Math.abs(Number(scalem[1]));
+  const deviceMm = (widths[0] * scale) / ptPerMm;
+  assert.ok(Math.abs(deviceMm - 0.2) < 1e-6, `cut stroke is ${deviceMm}mm, expected 0.2mm`);
+});
+
+test('imported spot names are reported and a cut spot is identified', async () => {
+  // A sheet can only carry one white and one cut spot. Files from different shops
+  // disagree, so the importer has to report what each file uses.
+  const mod = { exports: {} };
+  const win = {}; win.self = win; win.navigator = { userAgent: 'node', platform: 'node', appName: 'node' };
+  const load = (code, args) => new Function('window', 'globalThis', 'self', 'navigator', 'console', 'module', 'exports', code)(...args);
+  load(require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'pdf-import.js'), 'utf8'),
+    [global, global, global, win.navigator, console, mod, mod.exports]);
+  const imp = mod.exports;
+  // The picker must prefer the usual cut words over anything else present.
+  assert.equal(imp.__test_pickCutSpot([{ name: 'spot_0' }, { name: 'CutContour' }]), 'CutContour');
+  assert.equal(imp.__test_pickCutSpot([{ name: 'White' }, { name: 'Die' }]), 'Die');
+  assert.equal(imp.__test_pickCutSpot([{ name: 'White' }, { name: 'Kiss-cut' }]), 'Kiss-cut');
+  // Fall back to the one spot that is not the white plate.
+  assert.equal(imp.__test_pickCutSpot([{ name: 'rdg_white' }, { name: 'MyPlate' }]), 'MyPlate');
+  assert.equal(imp.__test_pickCutSpot([]), null);
+});

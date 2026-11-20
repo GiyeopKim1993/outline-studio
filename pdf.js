@@ -147,7 +147,7 @@
       const rot = ((Number(it.rot) || 0) % 360 + 360) % 360;
       const ppm = it.pixelsPerMm;
       const bw = it.widthMm, bh = it.heightMm;
-      // artwork px -> sheet mm (y down), identical to nesting.js placementMatrix()
+      // pixel -> sheet mm (y down), rotation included
       let m;
       switch (rot) {
         case 90: m = [0, 1 / ppm, -1 / ppm, 0, it.xMm + bw, it.yMm]; break;
@@ -174,8 +174,19 @@
       // Artwork is clipped to the cut outline. Without this, art that spills past
       // the cut (a halo drawn outside the MediaBox, bleed left in the source PDF)
       // would print outside the item and overlap its neighbours on the sheet.
-      cmds.push(`/OC /ArtLayer BDC\nq\n/ArtOverprint gs\n${mat} cm\n${vectorPath(it.cutPaths)}\nW* n\n/Artwork${i} Do\nQ\nEMC`);
+      // `Do` paints the image onto the UNIT square, while every path here lives in
+      // pixel space (0..width, 0..height). So after the clip, scale the unit square
+      // up to the pixel rect with `cm`. This `cm` concatenates with the one above,
+      // which is exactly what we want: pixels -> mm. Passing the image the placement
+      // matrix instead would apply the placement twice and land it off-page; passing
+      // it the bare matrix left it a single pixel. A sheet therefore showed cut lines
+      // only, with the artwork either invisible or flung into the margin.
+      // Paint order matters, not just layer membership. The white plate is a solid
+      // silhouette of the whole piece; emitting it AFTER the artwork buried the
+      // artwork under it, which is why a saved sheet showed only the cut line. The
+      // white layer has to go down first and the artwork on top of it.
       cmds.push(`/OC /WhiteLayer BDC\nq\n/WhiteOverprint gs\n${mat} cm\n/WhiteSpot cs\n1 scn\n${vectorPath(it.whitePaths)}\nf*\nQ\nEMC`);
+      cmds.push(`/OC /ArtLayer BDC\nq\n/ArtOverprint gs\n${mat} cm\n${vectorPath(it.cutPaths)}\nW* n\n${pdfNumber(it.width)} 0 0 ${pdfNumber(it.height)} 0 0 cm\n/Artwork${i} Do\nQ\nEMC`);
       cmds.push(`/OC /CutLayer BDC\nq\n/CutOverprint gs\n${mat} cm\n/CutSpot CS\n1 SCN\n${pdfNumber(0.2 * it.pixelsPerMm)} w\n1 J 1 j\n${vectorPath(it.cutPaths)}\nS\nQ\nEMC`);
     });
     for (const b of bases) {
