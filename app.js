@@ -45,6 +45,11 @@
   let toastTimer=0;
 
   function setFlowStage(stage){document.body.dataset.flowStage=String(stage);const a=$('workflowStep1'),b=$('workflowStep2');a.classList.toggle('active',stage===1);b.classList.toggle('active',stage===2);if(stage===2)a.classList.add('done');else a.classList.remove('done');}
+  // Everything processPipeline() reads, serialised. A saved batch result is only
+  // reusable while this string is unchanged, so ANY setting change (mirror,
+  // offset, height, tab, gap-fill...) invalidates it automatically.
+  function settingsKey(){return JSON.stringify(settings());}
+  try{window.__outlineDebug=Object.assign(window.__outlineDebug||{},{settingsKey:()=>settingsKey()});}catch(_){ }
   function settings(){
     const number=(id,fallback)=>{const el=$(id),value=Number(el.value);return el.value!==''&&Number.isFinite(value)?value:fallback;};
     const height=number('heightInput',148.5),tabDepth=number('tabDepthInput',3),offset=number('offsetInput',2);
@@ -509,7 +514,7 @@
     if(!batchStore.inRange(index)||!state.mask||!state.artCanvas)return;
     // Capture the whole item synchronously. The await below must never re-read
     // `state`, otherwise a tab switch mid-save mixes two items together.
-    const snapshot={name:batchFiles[index]?.name||state.sourceName,sourceName:state.sourceName,w:state.w,h:state.h,ppm:state.ppm,maskRle:packMask(state.mask),autoRle:packMask(state.autoMask||state.mask),whitePaths:JSON.parse(JSON.stringify(state.whitePaths)),whiteAreaMm2:state.whiteAreaMm2,metrics:JSON.parse(JSON.stringify(state.metrics||{})),outputName:els.outputName.value,customFileName:state.customFileName,dirty:state.dirty,history:state.history.map(packMask),file:batchFiles[index],pixels:state.w*state.h};
+    const snapshot={name:batchFiles[index]?.name||state.sourceName,settingsKey:settingsKey(),sourceName:state.sourceName,w:state.w,h:state.h,ppm:state.ppm,maskRle:packMask(state.mask),autoRle:packMask(state.autoMask||state.mask),whitePaths:JSON.parse(JSON.stringify(state.whitePaths)),whiteAreaMm2:state.whiteAreaMm2,metrics:JSON.parse(JSON.stringify(state.metrics||{})),outputName:els.outputName.value,customFileName:state.customFileName,dirty:state.dirty,history:state.history.map(packMask),file:batchFiles[index],pixels:state.w*state.h};
     const canvas=state.artCanvas;
     snapshot.artBlob=await blobFromCanvas(canvas);
     batchStore.put(index,snapshot);
@@ -557,7 +562,10 @@
     if(state.mask&&batchStore.active>=0)await saveBatchInto(batchStore.active);
     for(let i=0;i<files.length;i++){
       if(gen!==batchGeneration){setStatus('새 이미지 목록으로 교체되어 배치를 중단했습니다.');break;}
-      if(batchStore.has(i))continue;
+      const cached=batchStore.get(i);
+      // Reuse a stored result only if it was produced with the current settings.
+      if(cached&&cached.maskRle&&cached.settingsKey===settingsKey())continue;
+      if(cached&&!cached.maskRle)continue;
       state.customFileName=false;setStatus(`배치 처리 ${i+1}/${files.length} · ${files[i].name}`,'busy');
       // Each item is isolated: one bad file must never take the batch down.
       try{

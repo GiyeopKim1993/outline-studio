@@ -81,7 +81,15 @@
     }
     const [rgbStream, alphaStream] = await Promise.all([encodeStream(rgb), encodeStream(alpha)]);
     const scale = pdfNumber(pointScale), w = pdfNumber(pageWidth), h = pdfNumber(pageHeight);
-    const artCmd = `/OC /ArtLayer BDC\nq\n/ArtOverprint gs\n${w} 0 0 ${h} 0 0 cm\n/Artwork Do\nQ\nEMC`;
+    // Artwork is clipped to the cut outline, exactly like the nesting sheet.
+    // The crop box is the cut bounding box, but brush edits, the scaffold or tab
+    // can push opaque pixels outside the cut; without this they would print.
+    // The clip is built in artwork-pixel space (the same space as cutPaths), then
+    // the image is drawn in that space too: `W 0 0 -H 0 H` maps the unit square
+    // onto the pixel box, so the composed CTM comes out as exactly [w 0 0 h 0 0].
+    // Drawing with `w 0 0 h 0 0` here would compose with the clip scale and
+    // shrink the artwork (and every PDF importer would read the wrong matrix).
+    const artCmd = `/OC /ArtLayer BDC\nq\n/ArtOverprint gs\n${scale} 0 0 -${scale} 0 ${h} cm\n${vectorPath(cutPaths)}\nW* n\n${pdfNumber(width)} 0 0 -${pdfNumber(height)} 0 ${pdfNumber(height)} cm\n/Artwork Do\nQ\nEMC`;
     // White is painted as a named overprinting spot after the artwork.
     // A normal blend preserves the process plates in separating RIPs.
     // Use an overprint-aware viewer; actual ink order is set in the RIP.

@@ -226,6 +226,10 @@ function parseContent(src) {
   let lineWidth = 1;
   let pending = [];
   let path = [];
+  // Marked content (`/OC /Name BDC ... EMC`) is how print files label their
+  // layers. Without it a white plate, which is a solid silhouette of the whole
+  // figure, is indistinguishable from artwork and gets painted on top of it.
+  let markStack = [];
   let pos = [0, 0];
 
   const mul = (a, b) => [
@@ -243,6 +247,7 @@ function parseContent(src) {
             type: 'path', mode, points: sub.points,
             rawPoints: sub.rawPoints,
             lineWidth: lineWidth * Math.hypot(ctm[0], ctm[1]),
+            mark: markStack[markStack.length - 1] || null,
           });
         }
       }
@@ -360,7 +365,15 @@ function parseContent(src) {
       case 'f': case 'F': case 'f*': flushPath('f'); break;
       case 'B': case 'B*': case 'b': case 'b*': flushPath('B'); break;
       case 'n': flushPath('n'); break;
-      case 'Do': if (last.name) ops.push({ type: 'image', name: last.name, ctm: ctm.slice() }); break;
+      // `Do` is resolved to an Image or a Form later (see flattenForms): the
+      // content stream alone cannot tell them apart, only the /XObject dict can.
+      case 'BDC': case 'BMC': {
+        // `/OC /MCWhite BDC` leaves /MCWhite as the last name token.
+        markStack.push(typeof last.name === 'string' ? last.name.slice(1) : '');
+        break;
+      }
+      case 'EMC': markStack.pop(); break;
+      case 'Do': if (last.name) ops.push({ type: 'xobject', name: last.name, ctm: ctm.slice(), mark: markStack[markStack.length - 1] || null }); break;
       default: break;
     }
     pending = [];
@@ -375,13 +388,52 @@ function imageInfo(objectBody) {
     return m ? Number(m[1]) : null;
   };
   const filter = (/\/Filter\s*(\[[^\]]*\]|\/\w+)/.exec(objectBody) || [])[1] || '';
+  // Colour spaces come in two shapes. A name (`/DeviceRGB`) is easy; an array
+  // (`[/Separation /spot_0 /DeviceCMYK 14 0 R]`, `[/ICCBased 3 0 R]`,
+  // `[/Indexed /DeviceRGB 255 4 0 R]`) is what print-ready files actually use,
+  // and a `/\w+` match either fails or catches the *first* name inside the array,
+  // which is the family, not the channel count. Resolve the array properly.
+  const csMatch = /\/ColorSpace\s*(\[[^\]]*\]|\/\w+)/.exec(objectBody);
+  let colorSpace = null;
+  let channels = 0;
+  let kind = 'other';
+  if (csMatch) {
+    if (csMatch[1].startsWith('/')) {
+      colorSpace = csMatch[1];
+      channels = colorSpace === '/DeviceRGB' ? 3 : colorSpace === '/DeviceCMYK' ? 4
+        : colorSpace === '/DeviceGray' ? 1 : 0;
+      kind = colorSpace === '/DeviceGray' ? 'gray' : 'color';
+    } else {
+      const family = (/^\[\s*\/(\w+)/.exec(csMatch[1]) || [])[1] || '';
+      colorSpace = '[' + family + ']';
+      if (family === 'Separation' || family === 'DeviceN') {
+        // One ink: device space is irrelevant, there is a single tint channel.
+        channels = 1;
+        kind = 'spot';
+      } else if (family === 'ICCBased') {
+        // /N lives in the ICC stream's dict; 3 → RGB, 4 → CMYK, 1 → gray.
+        const ref = /\/ICCBased\s+(\d+)\s+\d+\s+R/.exec(csMatch[1]);
+        colorSpace = ref ? '[/ICCBased ' + ref[1] + ']' : '[/ICCBased]';
+        channels = 0;
+        kind = 'color';
+      } else if (family === 'Indexed' || family === 'I') {
+        channels = 1;
+        kind = 'color';
+      }
+    }
+  }
+  const smask = /\/SMask\s+(\d+)\s+\d+\s+R/.exec(objectBody);
   return {
     width: num('Width'),
     height: num('Height'),
-    colorSpace: (/\/ColorSpace\s*(\/\w+)/.exec(objectBody) || [])[1] || null,
+    colorSpace,
+    channels,
+    kind,
     bits: num('BitsPerComponent'),
     filter,
-    hasSMask: /\/SMask\s+\d+\s+\d+\s+R/.test(objectBody),
+    hasSMask: Boolean(smask),
+    smaskNum: smask ? Number(smask[1]) : null,
+    iccNum: (/ICCBased\s+(\d+)/.exec(colorSpace || '') || [])[1] ? Number(/ICCBased\s+(\d+)/.exec(colorSpace)[1]) : null,
   };
 }
 
@@ -414,7 +466,7 @@ function ascii85Decode(bytes) {
   return new Uint8Array(out);
 }
 
-async function imageToPngBlob(bytes, text, record, info) {
+async function imageToPngBlob(bytes, text, record, info, ctx = {}) {
   if (!info.width || !info.height) throw new Error('PDF 이미지 크기를 읽지 못했습니다.');
   // Only PNG-friendly encodings are wrapped directly; the rest are rebuilt.
   const isFlate = /FlateDecode/.test(info.filter);
@@ -427,18 +479,26 @@ async function imageToPngBlob(bytes, text, record, info) {
   }
   if (!isFlate) throw new Error('지원하지 않는 PDF 이미지 압축입니다 (DCTDecode 없음).');
 
-  let raw = await inflate(streamBytes(bytes, text, record));
-  const channels = info.colorSpace === '/DeviceRGB' ? 3
-    : info.colorSpace === '/DeviceCMYK' ? 4
-    : info.colorSpace === '/DeviceGray' ? 1 : 0;
+  let channels = info.channels;
+  // An ICC-based stream stores its channel count in the profile dict, not in the
+  // image dict, so it is resolved lazily here where the object table is in reach.
+  if (!channels && info.iccNum && ctx.objects) {
+    const icc = ctx.objects.get(info.iccNum);
+    if (icc) {
+      const n = (/\/N\s+(\d+)/.exec(icc.body) || [])[1];
+      if (n) channels = Number(n);
+    }
+  }
   if (!channels) throw new Error('지원하지 않는 PDF 이미지 색공간: ' + (info.colorSpace || 'unknown'));
 
-  let data = raw;
+  const raw = await inflate(streamBytes(bytes, text, record));
+  const px = info.width * info.height;
+
   if (info.bits !== 8) {
     if (info.bits === 1 && channels === 1) {
       // 1-bit gray -> 8-bit RGBA
       const stride = Math.ceil(info.width / 8);
-      const out = new Uint8Array(info.width * info.height * 4);
+      const out = new Uint8Array(px * 4);
       for (let y = 0; y < info.height; y++) {
         for (let x = 0; x < info.width; x++) {
           const bit = (raw[y * stride + (x >> 3)] >> (7 - (x & 7))) & 1;
@@ -450,27 +510,82 @@ async function imageToPngBlob(bytes, text, record, info) {
     }
     throw new Error(`지원하지 않는 bits per component: ${info.bits}`);
   }
-  if (info.bits === 8 && info.colorSpace === '/DeviceGray' && info.hasSMask) {
-    // alpha comes from a separate SMask; caller merges it
-  }
-  const out = new Uint8Array(info.width * info.height * 4);
-  const px = info.width * info.height;
-  for (let i = 0; i < px; i++) {
-    const o = i * 4;
-    if (channels === 4) {
-      const c = raw[i * 4], m = raw[i * 4 + 1], y = raw[i * 4 + 2], k = raw[i * 4 + 3];
-      out[o] = 255 - Math.min(255, c + k);
-      out[o + 1] = 255 - Math.min(255, m + k);
-      out[o + 2] = 255 - Math.min(255, y + k);
-    } else if (channels === 3) {
-      out[o] = raw[i * 3]; out[o + 1] = raw[i * 3 + 1]; out[o + 2] = raw[i * 3 + 2];
-    } else {
-      const v = raw[i];
-      out[o] = out[o + 1] = out[o + 2] = v;
+
+  // Decoder must consume exactly what the stream holds. Writers may emit a
+  // Flate stream whose payload is larger than width*height*channels (progressive
+  // scanline restarts, predictor leftovers); trusting the header alone yields a
+  // half-painted, banded image.
+  const need = px * channels;
+  // Emit at the size the page actually needs. A print plate can be 5301x8135,
+  // but the item canvas is a few hundred pixels across; encoding the full raster
+  // produced a 172MB PNG (a stored-deflate stream) that no decoder will take
+  // happily. Nearest-neighbour subsampling here is exact at integer ratios and
+  // cheap at any ratio.
+  const outW = Math.max(1, Math.min(info.width, Math.round(ctx.targetW || info.width)));
+  const outH = Math.max(1, Math.min(info.height, Math.round(ctx.targetH || info.height)));
+  const out = new Uint8Array(outW * outH * 4);
+  const rows = info.height;
+  const colSrc = new Int32Array(outW);
+  for (let x = 0; x < outW; x++) colSrc[x] = Math.min(info.width - 1, Math.floor((x * info.width) / outW));
+  const rowMap = new Int32Array(outH);
+  for (let y = 0; y < outH; y++) rowMap[y] = rows - 1 - Math.min(rows - 1, Math.floor((y * rows) / outH));
+  const strideIn = raw.length >= need ? channels : Math.max(1, Math.floor(raw.length / (rows * info.width) + 0.5));
+  const stride = info.width * (raw.length >= need ? channels : strideIn);
+
+  // PDF image space has v = 0 at the *bottom*, while the stream stores row 0 at
+  // the *top* of the picture. Writing the rows out in stream order and then
+  // drawing with v = 0 at the origin mirrors every imported artwork vertically.
+  // (Verified against an independent renderer: the figure came out upside down.)
+  for (let y = 0; y < outH; y++) {
+    const srcRow = rowMap[y] * stride;
+    const dstRow = y;
+    for (let x = 0; x < outW; x++) {
+      const o = (dstRow * outW + x) * 4;
+      const si = srcRow + colSrc[x] * strideIn;
+      if (info.kind === 'spot') {
+        // A single ink tint: show it as dark ink density on white.
+        const t = raw[si];
+        out[o] = out[o + 1] = out[o + 2] = 255 - t;
+      } else if (strideIn === 4) {
+        const c = raw[si], m = raw[si + 1], yy = raw[si + 2], k = raw[si + 3];
+        out[o] = 255 - Math.min(255, c + k);
+        out[o + 1] = 255 - Math.min(255, m + k);
+        out[o + 2] = 255 - Math.min(255, yy + k);
+      } else if (strideIn === 3) {
+        out[o] = raw[si]; out[o + 1] = raw[si + 1]; out[o + 2] = raw[si + 2];
+      } else {
+        const v = raw[si];
+        out[o] = out[o + 1] = out[o + 2] = v;
+      }
+      out[o + 3] = 255;
     }
-    out[o + 3] = 255;
   }
-  return encodePng(out, info.width, info.height);
+
+  // Composite a separate /SMask (soft matte) as alpha, streamed row by row so a
+  // 5301x8135 artwork does not need a second full-size buffer.
+  if (info.hasSMask && info.smaskNum && ctx.objects && ctx.text && ctx.bytes) {
+    try {
+      const smObj = ctx.objects.get(info.smaskNum);
+      const smRecord = smObj ? objectStreamOf(smObj, ctx.text) : null;
+      if (smRecord) {
+        const smRaw = await inflate(streamBytes(ctx.bytes, ctx.text, smRecord));
+        const smChannels = (/\/ColorSpace\s*\/DeviceGray/.test(smRecord.dict) ? 1
+          : (/\/ColorSpace\s*\/DeviceRGB/.test(smRecord.dict) ? 3 : 1));
+        const smW = Number((/\/Width\s+(\d+)/.exec(smRecord.dict) || [])[1]) || info.width;
+        const smH = Number((/\/Height\s+(\d+)/.exec(smRecord.dict) || [])[1]) || info.height;
+        if (smW === info.width && smH === info.height) {
+          for (let y = 0; y < outH; y++) {
+            const sRow = rowMap[y] * info.width * smChannels;
+            for (let x = 0; x < outW; x++) {
+              out[(y * outW + x) * 4 + 3] = smRaw[sRow + colSrc[x] * smChannels];
+            }
+          }
+        }
+      }
+    } catch (_) { /* no matte: keep the image opaque rather than fail the import */ }
+  }
+
+  return encodePng(out, outW, outH);
 }
 
 // Minimal PNG encoder (stored deflate blocks, no filtering).
@@ -521,10 +636,14 @@ function encodePng(rgba, width, height) {
     z.set(raw.subarray(i * 65535, i * 65535 + len), off);
     off += len;
   }
-  z[off++] = (b << 8 | a) >>> 24 & 255;
-  z[off++] = (b << 8 | a) >>> 16 & 255;
-  z[off++] = (b << 8 | a) >>> 8 & 255;
-  z[off++] = (b << 8 | a) & 255;
+  // adler32 is (b << 16) | a, written big-endian. Shifting by 8 instead of 16
+  // packs the two halves on top of each other, so the trailer is garbage and a
+  // strict decoder (every browser) rejects the whole image with "incorrect data
+  // check". That silently killed the artwork of every imported PDF.
+  z[off++] = (b >>> 8) & 255;
+  z[off++] = b & 255;
+  z[off++] = (a >>> 8) & 255;
+  z[off++] = a & 255;
   const ihdr = new Uint8Array(13);
   const dv = new DataView(ihdr.buffer);
   dv.setUint32(0, width); dv.setUint32(4, height);
@@ -564,22 +683,118 @@ async function inspect(arrayBuffer) {
     content += latin1(decoded) + '\n';
   }
   const ops = parseContent(content);
+  const xobjects = xobjectMap(resourcesDict(page, objects), objects);
+  const doc = { bytes, text, objects, page, widthMm, heightMm, ops, images: [], xobjects };
 
-  const resDict = resourcesDict(page, objects);
-  const xobjects = xobjectMap(resDict, objects);
+  // A finished artwork is usually wrapped in Form XObjects, one per layer
+  // (`WhiteForm`, `RasterForm`, `OutlineForm` in our own writer, `/Fm0` etc.
+  // elsewhere), and the page content only says `/Name Do`. Reading the page
+  // stream alone therefore sees no artwork and no cut line: the shapes live one
+  // level down, in the form's own stream with its own `/Resources`. Inline the
+  // forms by descending into every `/Name Do` that resolves to a Form XObject,
+  // applying the form's /Matrix the same way a viewer does.
+  const flat = await flattenForms(doc);
+  return Object.assign(doc, flat);
+}
+
+
+/**
+ * Decide whether an image is the visible artwork or a production plate.
+ *
+ * A die-cut PDF carries three stacked layers: a white plate (a solid silhouette
+ * printed behind the art so the piece is opaque), the process artwork, and the
+ * cut line. The white plate is a *single spot ink* and its name says so; painting
+ * it as art would bury the figure under a solid blob, and painting the cut plate
+ * would do the same in magenta.
+ */
+function classifyImageRole(op, info, dict) {
+  const hay = `${op.mark || ''} ${op.name || ''} ${info.colorSpace || ''} ${
+    (/\/Name\s*\/([^\s/<>]+)/.exec(dict) || [])[1] || ''}`;
+  if (!/\bArtwork\b/i.test(hay) && /white|whiteform|imwhite|milk|opaque|base\s*white/i.test(hay)) return 'white';
+  if (!/\bArtwork\b/i.test(hay) && /cut|cutline|cutcontour|outline|die|kiss/i.test(hay)) return 'cut';
+  // A single-ink plate is never the process artwork.
+  if (info.kind === 'spot') return 'white';
+  return 'art';
+}
+
+/** Multiply two PDF matrices (row-vector convention, same as `cm`). */
+function mulMatrix(a, b) {
+  return [
+    a[0] * b[0] + a[2] * b[1], a[1] * b[0] + a[3] * b[1],
+    a[0] * b[2] + a[2] * b[3], a[1] * b[2] + a[3] * b[3],
+    a[0] * b[4] + a[2] * b[5] + a[4], a[1] * b[4] + a[3] * b[5] + a[5],
+  ];
+}
+
+function parseMatrix(body) {
+  const m = /\/Matrix\s*\[([^\]]*)\]/.exec(body);
+  if (!m) return [1, 0, 0, 1, 0, 0];
+  const v = m[1].trim().split(/\s+/).map(Number);
+  return v.length === 6 && v.every((x) => Number.isFinite(x)) ? v : [1, 0, 0, 1, 0, 0];
+}
+
+/**
+ * Walk every Form XObject reachable from the page and return the page's ops with
+ * the forms inlined. Each inlined op carries the full CTM (page `cm` × form
+ * `/Matrix` × form content `cm`), so a viewer and this reader agree on where the
+ * ink lands.
+ */
+async function flattenForms(doc, options = {}) {
+  const maxDepth = options.maxDepth ?? 8;
+  const { bytes, text, objects, page } = doc;
+  const opList = [];
   const images = [];
-  for (const op of ops) {
-    if (op.type !== 'image') continue;
-    const num = xobjects.get(op.name);
-    if (!num) continue;
-    const obj = objects.get(num);
-    if (!obj) continue;
-    const record = objectStreamOf(obj, text);
-    if (!record) continue;
-    images.push({ name: op.name, num, ctm: op.ctm, info: imageInfo(record.dict), record });
-  }
+  const seen = new Set();
 
-  return { bytes, text, objects, page, widthMm, heightMm, ops, images, xobjects };
+  const resolveName = (map, name) => {
+    const num = map.get(name);
+    if (!num) return null;
+    const obj = objects.get(num);
+    if (!obj) return null;
+    const record = objectStreamOf(obj, text);
+    return record ? { num, obj, record } : null;
+  };
+
+  const walk = async (ops, xobjects, depth, visited) => {
+    for (const op of ops) {
+      if (op.type === 'xobject') {
+        const hit = resolveName(xobjects, op.name);
+        if (!hit) continue;
+        const isImage = /\/Subtype\s*\/Image\b/.test(hit.record.dict);
+        if (isImage) {
+          const info = imageInfo(hit.record.dict);
+          const role = classifyImageRole(op, info, hit.record.dict);
+          opList.push(Object.assign({}, op, { type: 'image', role }));
+          if (!images.some((im) => im.num === hit.num)) {
+            images.push({ name: op.name, num: hit.num, ctm: op.ctm, role, info, record: hit.record });
+          }
+          continue;
+        }
+        // Form XObject: descend.
+        op.type = 'form';
+      }
+      if (op.type !== 'form') { opList.push(op); continue; }
+      const hit = resolveName(xobjects, op.name);
+      if (!hit || depth >= maxDepth || visited.has(hit.num)) continue;
+      const inner = await decodeStream(bytes, text, hit.record);
+      const innerOps = parseContent(latin1(inner));
+      const matrix = mulMatrix(op.ctm, parseMatrix(hit.record.dict));
+      for (const o of innerOps) {
+        if (o.ctm) o.ctm = mulMatrix(matrix, o.ctm);
+        else o.ctm = matrix.slice();
+        if (o.points) o.points = o.points.map(([x, y]) => [matrix[0] * x + matrix[2] * y + matrix[4], matrix[1] * x + matrix[3] * y + matrix[5]]);
+        if (o.widths) { /* line width is in form space; the art pass only needs paths */ }
+      }
+      const innerRes = /\/Resources\s*<<[\s\S]*>>/.exec(hit.record.dict);
+      const innerXObj = xobjectMap(innerRes ? innerRes[0] : hit.record.dict, objects);
+      const next = new Set(visited); next.add(hit.num);
+      await walk(innerOps, innerXObj, depth + 1, next);
+    }
+  };
+
+  const pageXObjects = doc.xobjects;
+  await walk(doc.ops, pageXObjects, 0, seen);
+  return { ops: opList, images };
 }
 
 // Pure model extraction (no DOM): pixel-space paths + image placements.
@@ -626,12 +841,11 @@ async function extractItemModel(arrayBuffer, options = {}) {
   if (!cutPaths.length) cutPaths.push([[0, 0], [W, 0], [W, H], [0, H]]);
   if (!whitePaths.length) for (const loop of cutPaths) whitePaths.push(loop.map((p) => [p[0], p[1]]));
 
-  const images = [];
-  for (const op of doc.ops.filter((o) => o.type === 'image')) {
-    const found = doc.images.find((im) => im.name === op.name);
-    if (!found) continue;
-    images.push({ name: op.name, ctm: op.ctm, record: found.record, info: found.info });
-  }
+  // Use the flattened list as-is: it already carries the role tag (art / white /
+  // cut) and the object number, both of which a rebuild from `doc.ops` loses.
+  const images = doc.images.map((im) => ({
+    name: im.name, num: im.num, ctm: im.ctm, role: im.role || 'art', record: im.record, info: im.info, mark: im.mark,
+  }));
 
   return {
     doc, ppm, W, H,
@@ -659,11 +873,23 @@ async function toNestingItem(arrayBuffer, options = {}) {
   const canvas = makeCanvas(W, H);
   const ctx = canvas.getContext('2d');
 
-  // Artwork: paint each image through its own cm matrix.
-  for (const im of model.images) {
+  // Artwork: paint each image through its own cm matrix. Plates are ordered so
+  // the white silhouette lands first and the process artwork covers it; skipping
+  // the plates entirely would also be defensible, but drawing the white keeps the
+  // piece opaque exactly as it prints.
+  const paintOrder = model.images.slice().sort((a, b) => {
+    const rank = (r) => (r === 'white' ? 0 : r === 'art' ? 1 : 2);
+    return rank(a.role) - rank(b.role);
+  });
+  for (const im of paintOrder) {
     let bitmap;
     try {
-      const blob = await imageToPngBlob(model.bytes, model.text, im.record, im.info);
+      // Ask for a raster no larger than the item canvas: the plate and the page
+      // box share an aspect ratio, so the target box is a safe upper bound.
+      const blob = await imageToPngBlob(model.bytes, model.text, im.record, im.info, {
+        objects: model.doc.objects, text: model.text, bytes: model.bytes,
+        targetW: W, targetH: H,
+      });
       bitmap = await decodeImage(blob);
     } catch (_) { continue; }
     const m = im.ctm;

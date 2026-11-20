@@ -66,3 +66,15 @@ test('refuses to silently export a blank white plate or blank cutline', async ()
   await assert.rejects(() => OutlinePDF.create({ ...fixture(), whitePaths: [] }), /화이트 영역이 없습니다/);
   await assert.rejects(() => OutlinePDF.create({ ...fixture(), cutPaths: [] }), /칼선이 비어 있습니다/);
 });
+
+test('the single-item artwork is clipped to the cut outline', async () => {
+  // Without the clip, opaque pixels outside the cut line print. The nesting sheet
+  // already did this; the single-item export did not.
+  const data = Buffer.from(await (await OutlinePDF.create(fixture())).arrayBuffer());
+  const content = extractContent(data);
+  const art = content.match(/\/OC \/ArtLayer BDC([\s\S]*?)EMC/);
+  assert.ok(art, 'ArtLayer block must exist');
+  assert.ok(/\bW\*\s*n\b/.test(art[1]), 'the artwork must be clipped with W* n');
+  assert.ok(art[1].indexOf('W* n') < art[1].indexOf('/Artwork'),
+    'the clip must be established before the image is drawn');
+});

@@ -667,6 +667,8 @@ function dilateMask(mask, cols, rowsN, radius) {
 function makeSiteTester(grid, baseSize) {
   const { integral, stride, r, cols, rowsN } = grid;
   return (x, y) => {
+    // Anything already burned in (a placed base) rejects the site outright.
+    if (hitsBurnedRect(grid, x, y, baseSize)) return false;
     // Cells fully inside the square; rounding inward keeps the check conservative.
     const gx0 = Math.ceil((x + 1e-6) / r);
     const gy0 = Math.ceil((y + 1e-6) / r);
@@ -699,26 +701,57 @@ function cloneGrid(grid) {
     r: grid.r,
     W: grid.W,
     H: grid.H,
+    // Burned rectangles are copied so a strategy can be evaluated without
+    // mutating the grid the other strategy will reuse.
+    burned: grid.burned ? grid.burned.slice() : [],
   };
 }
 
-/** Burn a rectangle (grown by `gap`) into a grid so later queries reject it. */
+/**
+ * Burn a rectangle (grown by `gap`) into the grid so later queries reject it.
+ *
+ * Patching the integral image in place is a trap. A prefix sum carries a vertical
+ * accumulation as well as a horizontal one, so the old "raise this cell and
+ * everything to its right by 1" trick was correct for its own row and stale for
+ * every row below it. It happened to look fine for the tiny shadows used during
+ * packing, where the next probe sits in the same row, but a 35mm base spans ~140
+ * raster rows: the top and bottom edges of its shadow cancelled out and the square
+ * read as free, so each band dropped a base on top of the previous one.
+ *
+ * The grid therefore keeps a list of burned rectangles and answers from it
+ * directly. That is exact (no prefix bookkeeping to go stale), O(placed) per
+ * query instead of O(1), and the list only ever holds the bases placed so far, so
+ * the cost stays trivial next to the artwork integral test that runs first.
+ */
+function burnRect(grid, x, y, size, gap) {
+  if (!grid.burned) grid.burned = [];
+  grid.burned.push([x - gap, y - gap, x + size + gap, y + size + gap]);
+}
+
+/** True when an axis-aligned rectangle touches anything burned into the grid. */
+function hitsBurnedRect(grid, x, y, size) {
+  const list = grid.burned;
+  if (!list || !list.length) return false;
+  const x2 = x + size, y2 = y + size;
+  for (let i = 0; i < list.length; i++) {
+    const b = list[i];
+    if (x < b[2] - EPS && b[0] < x2 - EPS && y < b[3] - EPS && b[1] < y2 - EPS) return true;
+  }
+  return false;
+}
+
+/** Back-compat shim: burn a rectangle and keep `mask` visually in sync. */
 function shadowRect(grid, x, y, size, gap) {
-  const { integral, stride, cols, rowsN, r } = grid;
+  burnRect(grid, x, y, size, gap);
+  const { mask, cols, rowsN, r } = grid;
+  if (!mask || mask.length !== cols * rowsN) return;
   const gx0 = Math.max(0, Math.ceil((x - gap) / r));
   const gy0 = Math.max(0, Math.ceil((y - gap) / r));
   const gx1 = Math.min(cols - 1, Math.floor((x + size + gap) / r));
   const gy1 = Math.min(rowsN - 1, Math.floor((y + size + gap) / r));
   for (let gy = gy0; gy <= gy1; gy++) {
-    const rowBase = gy * stride;
-    for (let gx = gx0; gx <= gx1; gx++) {
-      const idx = rowBase + gx + 1;
-      if (integral[idx] - integral[idx - 1] > 0) continue; // already blocked
-      // Add 1 to this cell for every query window that covers it. Because the
-      // integral is additive, raising the cell and all cells to its right in this
-      // row by 1 keeps prefix sums correct.
-      for (let k = gx + 1; k <= cols; k++) integral[rowBase + k] += 1;
-    }
+    const rowBase = gy * cols;
+    for (let gx = gx0; gx <= gx1; gx++) mask[rowBase + gx] = 1;
   }
 }
 
