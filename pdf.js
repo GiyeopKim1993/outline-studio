@@ -186,7 +186,13 @@
       // artwork under it, which is why a saved sheet showed only the cut line. The
       // white layer has to go down first and the artwork on top of it.
       cmds.push(`/OC /WhiteLayer BDC\nq\n/WhiteOverprint gs\n${mat} cm\n/WhiteSpot cs\n1 scn\n${vectorPath(it.whitePaths)}\nf*\nQ\nEMC`);
-      cmds.push(`/OC /ArtLayer BDC\nq\n/ArtOverprint gs\n${mat} cm\n${vectorPath(it.cutPaths)}\nW* n\n${pdfNumber(it.width)} 0 0 ${pdfNumber(it.height)} 0 0 cm\n/Artwork${i} Do\nQ\nEMC`);
+      // The unit square has to be flipped as well as scaled. The shared `mat`
+      // already flips mm->pt (y up), but the artwork is stored with row 0 at the
+      // TOP of the picture while PDF image space puts v=0 at the bottom. Without
+      // the negative height here every artwork printed upside down, a full 180°
+      // out of phase with its own cut line. `create()` does the same thing with
+      // `width 0 0 -height 0 height`.
+      cmds.push(`/OC /ArtLayer BDC\nq\n/ArtOverprint gs\n${mat} cm\n${vectorPath(it.cutPaths)}\nW* n\n${pdfNumber(it.width)} 0 0 -${pdfNumber(it.height)} 0 ${pdfNumber(it.height)} cm\n/Artwork${i} Do\nQ\nEMC`);
       cmds.push(`/OC /CutLayer BDC\nq\n/CutOverprint gs\n${mat} cm\n/CutSpot CS\n1 SCN\n${pdfNumber(0.2 * it.pixelsPerMm)} w\n1 J 1 j\n${vectorPath(it.cutPaths)}\nS\nQ\nEMC`);
     });
     for (const b of bases) {

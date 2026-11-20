@@ -176,13 +176,14 @@ test('the artwork is painted at its real pixel extent, not as a single pixel', a
   const sx = Math.abs(Number(pm[1])), sy = Math.abs(Number(pm[4]));
   const unitW = Number(unit[1]), unitH = Number(unit[4]);
   assert.equal(unitW, w, 'unit square scaled to the pixel width');
-  assert.equal(unitH, h, 'unit square scaled to the pixel height');
+  assert.equal(unitH, -h, 'unit square scaled to the pixel height and flipped upright');
   // Combined x-scale must put one artwork pixel at 1/ppm mm in points.
   const ptPerMm = 72 / 25.4;
   assert.ok(Math.abs(sx * unitW - (w / ppm) * ptPerMm) < 1e-3,
     `artwork width ${sx * unitW}pt should be ${(w / ppm) * ptPerMm}pt`);
-  assert.ok(Math.abs(sy * unitH - (h / ppm) * ptPerMm) < 1e-3,
-    `artwork height ${sy * unitH}pt should be ${(h / ppm) * ptPerMm}pt`);
+  // unitH is negative (the raster is flipped upright), so compare magnitudes.
+  assert.ok(Math.abs(Math.abs(sy * unitH) - (h / ppm) * ptPerMm) < 1e-3,
+    `artwork height ${Math.abs(sy * unitH)}pt should be ${(h / ppm) * ptPerMm}pt`);
 });
 
 test('white plate is painted before the artwork, cut line last', async () => {
@@ -229,4 +230,42 @@ test('imported spot names are reported and a cut spot is identified', async () =
   // Fall back to the one spot that is not the white plate.
   assert.equal(imp.__test_pickCutSpot([{ name: 'rdg_white' }, { name: 'MyPlate' }]), 'MyPlate');
   assert.equal(imp.__test_pickCutSpot([]), null);
+});
+
+test('sheet artwork is not upside down relative to its cut line', async () => {
+  // The artwork stream stores row 0 at the TOP of the picture, while PDF image
+  // space puts v = 0 at the BOTTOM. Scaling the unit square with a positive height
+  // therefore printed every item upside down — a full 180° out of phase with its
+  // own cut line. `create()` already used `width 0 0 -height 0 height`; the sheet
+  // writer had dropped the sign.
+  const ppm = 6, w = 100, h = 200;
+  const rgba = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      rgba[o] = y < h / 2 ? 230 : 30;       // top half red
+      rgba[o + 1] = 30;
+      rgba[o + 2] = y < h / 2 ? 30 : 230;   // bottom half blue
+      rgba[o + 3] = 255;
+    }
+  }
+  const artwork = { width: w, height: h, getContext: () => ({ getImageData: () => ({ data: rgba }) }) };
+  const blob = await OutlinePDF.createSheet({
+    sheetWidthMm: 100, sheetHeightMm: 100,
+    items: [{
+      artwork, width: w, height: h, pixelsPerMm: ppm, widthMm: w / ppm, heightMm: h / ppm,
+      whitePaths: [[[0, 0], [w, 0], [w, h], [0, h]]],
+      cutPaths: [[[0, 0], [w, 0], [w, h], [0, h]]],
+      xMm: 30, yMm: 30, rot: 0,
+    }],
+    bases: [], whiteName: 'W', cutName: 'C',
+  });
+  const content = decodeContent(Buffer.from(await blob.arrayBuffer()));
+  assert.ok(content, 'content stream decoded');
+  // The last cm before the Do is the unit-square scale; its height must be negative.
+  const at = content.indexOf('/Artwork0 Do');
+  const unit = /([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) cm\n$/.exec(content.slice(0, at));
+  assert.ok(unit, 'unit-square scale found');
+  assert.equal(Number(unit[1]), w, 'width is positive');
+  assert.equal(Number(unit[4]), -h, 'height must be negative so the raster is flipped upright');
 });
