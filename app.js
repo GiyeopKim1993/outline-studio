@@ -11,7 +11,7 @@
     scaffoldWidth:$('scaffoldWidth'),scaffoldMeta:$('scaffoldMeta'),tabWarning:$('tabWarning'),
     metricStatus:$('metricStatus'),metricSize:$('metricSize'),metricComponents:$('metricComponents'),metricHoles:$('metricHoles'),metricWebs:$('metricWebs')
   };
-  const state={file:null,sourceBitmap:null,artCanvas:null,overlayCanvas:null,w:0,h:0,ppm:0,artMask:null,whitePaths:[],whiteAreaMm2:0,autoMask:null,mask:null,tool:'brush',painting:false,lastPoint:null,history:[],metrics:null,sourceName:'',cursor:null,dirty:false,customFileName:false,busy:false,loadVersion:0,showArt:true,showWhite:true,showCut:true};
+  const state={file:null,sourceBitmap:null,artCanvas:null,overlayCanvas:null,w:0,h:0,ppm:0,artMask:null,whitePaths:[],whiteAreaMm2:0,autoMask:null,mask:null,tool:'brush',painting:false,lastPoint:null,history:[],metrics:null,sourceName:'',cursor:null,dirty:false,customFileName:false,busy:false,loadVersion:0,showArt:true,showWhite:true,showCut:true,flipX:false};
   let batchFiles=[],batchBusy=false;
   // One editing operation at a time. A tab click can never interleave with
   // the middle of a batch item and leave `state` half-loaded.
@@ -50,7 +50,8 @@
     const height=number('heightInput',148.5),tabDepth=number('tabDepthInput',3),offset=number('offsetInput',2);
     return {targetHeight:height,offset,webWidth:number('webInput',10),gap:number('gapInput',4),
       tabWidth:number('tabWidthInput',30),tabDepth,
-      taper:number('taperInput',1),tipR:number('tipRadiusInput',.75),speck:number('speckInput',1),alpha:number('alphaInput',8)};
+      taper:number('taperInput',1),tipR:number('tipRadiusInput',.75),speck:number('speckInput',1),alpha:number('alphaInput',8),
+      flipX:!!state.flipX};
   }
   function setStatus(text,kind=''){els.status.textContent=text;els.status.className='status-line '+kind;}
   function toast(text){els.toast.textContent=text;els.toast.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>els.toast.classList.remove('show'),2200);}
@@ -486,11 +487,19 @@
 
   async function loadFile(file,slot=-1){if(!file)return;if(state.busy){toast('처리가 끝난 뒤 새 이미지를 선택하세요.');return;}setFlowStage(1);$('workflowStep2').disabled=true;if(!/image\/(png|webp)/.test(file.type)){toast('투명 알파가 있는 PNG 또는 WEBP 이미지를 선택하세요.');return;}const loadVersion=++state.loadVersion;if(slot>=0)batchStore.setActive(slot);state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.history=[];state.metrics=null;state.dirty=false;state.whitePaths=[];state.whiteAreaMm2=0;state.metrics=null;state.artCanvas=null;state.overlayCanvas=null;setEnabled(false);updateWhiteInfo();resetScaffoldInfo();els.processBtn.disabled=true;state.file=file;state.sourceName=file.name;if(!state.customFileName)els.outputName.value=filenameStem(file.name.replace(/\.(?:png|webp)$/i,''));
     try{const bitmap=await createImageBitmap(file);if(loadVersion!==state.loadVersion){bitmap.close();return;}if(state.sourceBitmap)state.sourceBitmap.close();state.sourceBitmap=bitmap;const tmp=document.createElement('canvas');tmp.width=bitmap.width;tmp.height=bitmap.height;tmp.getContext('2d').drawImage(bitmap,0,0);const data=tmp.getContext('2d').getImageData(0,0,tmp.width,tmp.height).data;let minX=tmp.width,minY=tmp.height,maxX=-1,maxY=-1,hasTransparency=false;for(let y=0;y<tmp.height;y++)for(let x=0;x<tmp.width;x++){const a=data[(y*tmp.width+x)*4+3];if(a<250)hasTransparency=true;if(a>1){if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}}
-      if(maxX<minX)throw new Error('alpha 채널에서 전경을 찾을 수 없습니다.');if(!hasTransparency){state.file=null;els.processBtn.disabled=true;setStatus('투명 알파가 없습니다. 배경이 제거된 PNG/WEBP를 선택하세요.','error');toast('투명 알파가 있는 입력이 필요합니다.');return;}const cw=maxX-minX+1,ch=maxY-minY+1;const crop=document.createElement('canvas');crop.width=cw;crop.height=ch;crop.getContext('2d').drawImage(tmp,minX,minY,cw,ch,0,0,cw,ch);state.croppedCanvas=crop;
+      if(maxX<minX)throw new Error('alpha 채널에서 전경을 찾을 수 없습니다.');if(!hasTransparency){state.file=null;els.processBtn.disabled=true;setStatus('투명 알파가 없습니다. 배경이 제거된 PNG/WEBP를 선택하세요.','error');toast('투명 알파가 있는 입력이 필요합니다.');return;}const cw=maxX-minX+1,ch=maxY-minY+1;const crop=document.createElement('canvas');crop.width=cw;crop.height=ch;
+      // Mirror happens here, on the cropped pixels, so every downstream stage
+      // (silhouette, white spot, scaffold, preview, PDF) follows automatically.
+      const cctx=crop.getContext('2d');
+      if(state.flipX){cctx.translate(cw,0);cctx.scale(-1,1);}
+      cctx.drawImage(tmp,minX,minY,cw,ch,0,0,cw,ch);
+      state.croppedCanvas=crop;
       els.fileMeta.classList.remove('hidden');els.fileMeta.innerHTML=`<b>${escapeHtml(file.name)}</b><br>${bitmap.width} × ${bitmap.height}px · alpha bbox ${cw} × ${ch}px`;
       els.processBtn.disabled=false;setStatus('이미지 준비 완료 · 설정을 확인하고 파이프라인을 실행하세요.');toast('이미지를 브라우저 메모리에 불러왔습니다.');
       // Fast preview before processing.
-      els.canvasWrap.classList.remove('empty-state');els.canvasWrap.classList.add('has-image');const ctx=els.canvas.getContext('2d');els.canvas.width=bitmap.width;els.canvas.height=bitmap.height;ctx.drawImage(bitmap,0,0);els.canvas.style.display='block';
+      els.canvasWrap.classList.remove('empty-state');els.canvasWrap.classList.add('has-image');const ctx=els.canvas.getContext('2d');els.canvas.width=bitmap.width;els.canvas.height=bitmap.height;
+      if(state.flipX){ctx.translate(bitmap.width,0);ctx.scale(-1,1);}
+      ctx.drawImage(bitmap,0,0);els.canvas.style.display='block';
     }catch(e){if(loadVersion===state.loadVersion)setStatus('이미지 읽기 실패: '+e.message,'error');}
   }
   // RLE lives in rle.js now; keep the local names for call sites.
@@ -589,6 +598,17 @@
   els.brushSize.addEventListener('input',()=>{els.brushSizeText.value=Number(els.brushSize.value).toFixed(1).replace(/\.0$/,'')+' mm';render();});
   els.undoBtn.addEventListener('click',undo);els.resetEditsBtn.addEventListener('click',resetEdits);els.fitBtn.addEventListener('click',()=>{els.canvas.style.maxWidth='100%';els.canvas.style.maxHeight='100%';});
   els.pdfBtn.addEventListener('click',exportPdf);els.svgBtn.addEventListener('click',exportSvg);els.pngBtn.addEventListener('click',exportPng);els.jsonBtn.addEventListener('click',exportJson);
+  // Mirroring invalidates the current result. Re-derive it from the source image
+  // instead of trying to mirror the mask after the fact.
+  $('flipX')?.addEventListener('change',async(e)=>{
+    state.flipX=!!e.target.checked;
+    if(!state.file)return;
+    const slot=batchStore.active>=0?batchStore.active:-1;
+    await loadFile(state.file,slot);
+    if(state.flipX!==!!$('flipX').checked)return;
+    if(state.croppedCanvas){markPipelineDirty();await processPipeline();}
+    else setStatus('이미지를 다시 불러오지 못했습니다.','error');
+  });
   $('nestingPreviewBtn')?.addEventListener('click',previewNesting);$('nestingPdfBtn')?.addEventListener('click',exportNestingPdf);
   $('pdfImportInput')?.addEventListener('change',async(e)=>{const files=[...(e.target.files||[])];e.target.value='';await importFinishedPdfs(files);});
   $('pdfImportClear')?.addEventListener('click',()=>{pdfNestingItems.length=0;renderPdfImportList();$('nestingPreview')?.classList.add('hidden');const st=$('nestingStatus');if(st)st.textContent='';toast('가져온 PDF를 비웠습니다.');});
