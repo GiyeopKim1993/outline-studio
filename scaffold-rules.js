@@ -8,8 +8,8 @@
   const SQRT3 = Math.sqrt(3);
   const SWITCH_WIDTH_MM = 50;
   const SCAFFOLD_DIMENSION_MM = 47;
-  // Shared R1 radius for both scaffold shapes.
-  const CORNER_RADIUS_MM = 1;
+  // Shared R3 radius for both scaffold shapes.
+  const CORNER_RADIUS_MM = 3;
 
   // The triangle virtual side and rounded-rectangle width use a 47 mm
   // nominal dimension. Shape switching remains based on W = 50 mm.

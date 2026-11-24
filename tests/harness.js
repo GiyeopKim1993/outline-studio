@@ -9,7 +9,7 @@ const path = require('node:path');
 const { JSDOM } = require('jsdom');
 
 const SRC = '/home/user/site-deploy/final-stage';
-const ORDERS = ['vendor/clipper.js', 'pdf.js', 'scaffold-rules.js', 'nesting-geometry.js',
+const ORDERS = ['vendor/clipper.js', 'pdf.js', 'scaffold-rules.js', 'cut-vector.js', 'nesting-geometry.js',
   'nesting.js', 'pdf-import.js', 'rle.js', 'render-state.js', 'batch-store.js', 'app.js'];
 
 function boot() {

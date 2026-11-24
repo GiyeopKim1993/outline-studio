@@ -60,6 +60,22 @@ class BatchStore {
     return clone(this._results[index]);
   }
 
+  /** Read-only reference (no copy) for cheap per-item fields like whiteTint.
+   *  Callers must not mutate it; writes go through update(). */
+  ref(index) {
+    return this.inRange(index) ? this._results[index] : undefined;
+  }
+
+  /** Merge a small patch into an existing result (values cloned). Used for
+   *  per-item fields edited after the result was stored, e.g. white tint. */
+  update(index, patch) {
+    if (!this.inRange(index) || this._results[index] === undefined) return false;
+    const p = clone(patch);
+    for (const k of Object.keys(p)) this._results[index][k] = p[k];
+    this._writes++;
+    return true;
+  }
+
   has(index) {
     return this.inRange(index) && this._results[index] !== undefined;
   }

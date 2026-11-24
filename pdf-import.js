@@ -585,6 +585,15 @@ async function imageToPngBlob(bytes, text, record, info, ctx = {}) {
     } catch (_) { /* no matte: keep the image opaque rather than fail the import */ }
   }
 
+  // At native size the PNG round-trip is pure waste: encodePng stores the raster
+  // uncompressed, so a 1440 dpi plate means a 172 MB blob plus JS-side CRC and
+  // adler loops, only to be decoded straight back into a canvas. Hand the pixels
+  // over directly; the PNG path remains for downsampled targets and tests.
+  // The raw hand-off needs a DOM (ImageData/putImageData); headless tests decode
+  // the PNG through their own hook instead.
+  if (ctx.rawPixels && outW === info.width && outH === info.height && typeof ImageData === 'function') {
+    return { rgba: out, width: outW, height: outH };
+  }
   return encodePng(out, outW, outH);
 }
 
@@ -829,10 +838,74 @@ async function flattenForms(doc, options = {}) {
   return { ops: opList, images };
 }
 
+// Press rasters arrive at the printer's own addressability (1440 dpi is common),
+// so re-sampling them onto a fixed 300 dpi grid threw away most of the paid-for
+// detail. Read the embedded raster's density instead: pixels over the physical
+// size it is placed at. Vector-only files carry no raster, hence no native
+// density: the caller then falls back to the cap, which is free for vectors.
+const MAX_PPM = 1440 / 25.4; // press addressability, and the memory safety cap
+function detectNativePpm(doc, capPpm = MAX_PPM) {
+  const pageArea = (doc.widthMm || 0) * (doc.heightMm || 0);
+  let best = 0;
+  for (const im of (doc && doc.images) || []) {
+    const info = im.info || {};
+    const ctm = im.ctm || [];
+    if (!info.width || !info.height || ctm.length < 6) continue;
+    const wMm = (Math.abs(ctm[0]) + Math.abs(ctm[2])) / PT_PER_MM;
+    const hMm = (Math.abs(ctm[1]) + Math.abs(ctm[3])) / PT_PER_MM;
+    if (wMm <= 0 || hMm <= 0) continue;
+    if (pageArea > 0 && wMm * hMm < pageArea * 0.25) continue; // skip tiny logos
+    best = Math.max(best, info.width / wMm, info.height / hMm);
+  }
+  return best ? Math.min(best, capPpm) : null;
+}
+
+// A source white plate is usually drawn flush with (or proud of) the silhouette,
+// while the artwork we re-emit is clipped to the cut line - reused as-is, the
+// plate visibly overhangs the printed image. Give imported plates the same
+// treatment the PNG pipeline gives its own: 0.3 mm erosion plus a 0.15 mm
+// opening, so the white always ends up smaller than the artwork.
+function chokeWhitePaths(paths, ppm, clipPaths = null, chokeMm = 0.3, openMm = 0.15) {
+  if (typeof ClipperLib === 'undefined' || !paths || !paths.length) return paths || [];
+  const scale = 1000;
+  let subject = paths.map((r) => r.map(([x, y]) => ({ X: Math.round(x * scale), Y: Math.round(y * scale) })));
+  // Source plates are sometimes drawn a touch proud of the source's own cut
+  // line; the artwork we emit is clipped to that cut, so clip the plate first -
+  // otherwise the overhang survives any erosion smaller than the bleed.
+  if (clipPaths && clipPaths.length) {
+    const clip = clipPaths.map((r) => r.map(([x, y]) => ({ X: Math.round(x * scale), Y: Math.round(y * scale) })));
+    const c = new ClipperLib.Clipper();
+    c.AddPaths(subject, ClipperLib.PolyType.ptSubject, true);
+    c.AddPaths(clip, ClipperLib.PolyType.ptClip, true);
+    const inter = new ClipperLib.Paths();
+    if (c.Execute(ClipperLib.ClipType.ctIntersection, inter, ClipperLib.PolyFillType.pftEvenOdd, ClipperLib.PolyFillType.pftEvenOdd)) {
+      if (inter.length) subject = inter;
+    }
+  }
+  const run = (ps, delta) => {
+    const off = new ClipperLib.ClipperOffset(2, 25);
+    const out = new ClipperLib.Paths();
+    off.AddPaths(ps, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+    off.Execute(out, delta);
+    return out.filter((r) => r.length >= 3);
+  };
+  let result = run(subject, -chokeMm * ppm * scale);
+  if (openMm > 0 && result.length) {
+    const shrunk = run(result, -openMm * ppm * scale);
+    if (shrunk.length) result = run(shrunk, openMm * ppm * scale);
+  }
+  return result.map((r) => r.map((p) => [p.X / scale, p.Y / scale]));
+}
+
 // Pure model extraction (no DOM): pixel-space paths + image placements.
 async function extractItemModel(arrayBuffer, options = {}) {
   const doc = await inspect(arrayBuffer);
-  const ppm = Number(options.pixelsPerMm) || 12; // 12 px/mm ≈ 305 dpi
+  const nativePpm = detectNativePpm(doc);
+  const asked = options.pixelsPerMm;
+  // 'native' asks for the source density; anything else keeps the old fixed grid.
+  const ppm = asked === 'native'
+    ? nativePpm || MAX_PPM
+    : Number(asked) || 12; // 12 px/mm ≈ 305 dpi
   const scale = ppm / PT_PER_MM;
   const W = Math.max(1, Math.round(doc.widthMm * ppm));
   const H = Math.max(1, Math.round(doc.heightMm * ppm));
@@ -887,10 +960,10 @@ async function extractItemModel(arrayBuffer, options = {}) {
     ? (doc.objects && whitePlateSpotName(doc, whitePlate)) : null;
 
   return {
-    doc, ppm, W, H,
+    doc, ppm, nativePpm, W, H,
     widthMm: doc.widthMm,
     heightMm: doc.heightMm,
-    cutPaths, whitePaths, images,
+    cutPaths, whitePaths: chokeWhitePaths(whitePaths, ppm, cutPaths), images,
     spots: spotNames,
     whiteSpot: whiteSpot || null,
     cutSpot: pickCutSpot(spots),
@@ -951,11 +1024,21 @@ async function toNestingItem(arrayBuffer, options = {}) {
     try {
       // Ask for a raster no larger than the item canvas: the plate and the page
       // box share an aspect ratio, so the target box is a safe upper bound.
-      const blob = await imageToPngBlob(model.bytes, model.text, im.record, im.info, {
+      const decoded = await imageToPngBlob(model.bytes, model.text, im.record, im.info, {
         objects: model.doc.objects, text: model.text, bytes: model.bytes,
-        targetW: W, targetH: H,
+        targetW: W, targetH: H, rawPixels: true,
       });
-      bitmap = await decodeImage(blob);
+      if (decoded && decoded.rgba) {
+        // Native size: the pixels are already decoded, so a 172 MB stored-PNG
+        // blob and its re-decode would be pure overhead. Put them straight into
+        // a scratch canvas the placement transform below can draw.
+        const scratch = makeCanvas(decoded.width, decoded.height);
+        const clamped = new Uint8ClampedArray(decoded.rgba.buffer, decoded.rgba.byteOffset, decoded.rgba.length);
+        scratch.getContext('2d').putImageData(new ImageData(clamped, decoded.width, decoded.height), 0, 0);
+        bitmap = scratch;
+      } else {
+        bitmap = await decodeImage(decoded);
+      }
     } catch (_) { continue; }
     const m = im.ctm;
     const corners = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([u, v]) => {
@@ -1010,10 +1093,11 @@ async function toNestingItem(arrayBuffer, options = {}) {
 if (typeof module !== 'undefined') {
   module.exports = {
     inspect, extractItemModel, toNestingItem, parseContent, encodePng, PT_PER_MM, imageInfo,
+    detectNativePpm, MAX_PPM, chokeWhitePaths,
     // Exposed for the naming tests only.
     __test_pickCutSpot: pickCutSpot,
   };
 }
 if (typeof window !== 'undefined') {
-  window.OutlinePdfImport = { inspect, extractItemModel, toNestingItem, parseContent, encodePng, PT_PER_MM };
+  window.OutlinePdfImport = { inspect, extractItemModel, toNestingItem, parseContent, encodePng, PT_PER_MM, detectNativePpm, MAX_PPM, chokeWhitePaths };
 }

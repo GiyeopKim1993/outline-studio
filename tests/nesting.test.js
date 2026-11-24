@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 global.ClipperLib = require('../vendor/clipper.js');
+global.CutVector = require('../cut-vector.js');
 const {
   packNesting, nestingPreviewSvg, placementMatrix, polygonsOverlap, MARGIN_MM,
 } = require('../nesting.js');
@@ -180,4 +181,17 @@ test('preview draws rows, cut outlines and real base geometry', () => {
   assert.ok(svg.includes('<image href="data:image/png;base64,AAAA"'), 'thumbnail embedded');
   assert.ok(svg.includes('matrix('), 'placement matrix applied');
   assert.ok(!svg.includes('<line x1="0.5"'), 'legacy placeholder removed');
+});
+
+test('placementMatrix is exported and follows a manual move', () => {
+  // The sheet editor drags placements; it relies on this helper to rebuild the
+  // cached matrix. A stale matrix moved the dashed box but left the artwork,
+  // white plate and cut line behind.
+  assert.equal(typeof placementMatrix, 'function');
+  const p = { rot: 0, pixelsPerMm: 4, width: 40, height: 80, xMm: 10, yMm: 20, widthMm: 10, heightMm: 20 };
+  assert.deepEqual(placementMatrix(p), [0.25, 0, 0, 0.25, 10, 20]);
+  p.xMm = 55; p.yMm = 60;
+  assert.deepEqual(placementMatrix(p), [0.25, 0, 0, 0.25, 55, 60], 'translation follows xMm/yMm');
+  p.rot = 180;
+  assert.deepEqual(placementMatrix(p), [-0.25, 0, 0, -0.25, 65, 80], 'a half turn keeps the footprint anchored');
 });

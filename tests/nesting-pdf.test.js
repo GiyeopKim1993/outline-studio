@@ -39,7 +39,13 @@ test('nesting sheet PDF is 400x300mm with items, bases and 3 OCG layers', async 
   assert.match(pdf, /\/Artwork1 \d+ 0 R/);
   assert.match(pdf, /\/Separation \/White#20Ink/);
   assert.match(pdf, /\/Separation \/Cut#2F1/);
-  assert.match(pdf, /\/ArtOverprint << \/Type \/ExtGState \/OP true/);
+  // Artwork is opaque CMYK, so it must knock out; white and cutline overprint.
+  assert.match(pdf, /\/ArtOverprint << \/Type \/ExtGState \/OP false \/op false \/OPM 1/);
+  assert.match(pdf, /\/OverprintPlate << \/Type \/ExtGState \/OP true \/op true \/OPM 1 >>/);
+  // Layer names are the export contract, not the spot names.
+  assert.match(pdf, /\/OCG \/Name <FEFF0041007200740077006F0072006B>/);   // Artwork
+  assert.match(pdf, /\/OCG \/Name <FEFF00570068006900740065>/);            // White
+  assert.match(pdf, /\/OCG \/Name <FEFF004300750074006C0069006E0065>/);    // Cutline
   // Content stream must reference both images and base cut paths.
   const m = /stream\n/.exec(pdf);
   assert.ok(m);
@@ -268,4 +274,55 @@ test('sheet artwork is not upside down relative to its cut line', async () => {
   assert.ok(unit, 'unit-square scale found');
   assert.equal(Number(unit[1]), w, 'width is positive');
   assert.equal(Number(unit[4]), -h, 'height must be negative so the raster is flipped upright');
+});
+
+test('white tint scales the separation component and is recorded on the layer', async () => {
+  const ppm = 6, w = 90, h = 200;
+  const item = {
+    artwork: fakeArtwork(w, h), width: w, height: h, pixelsPerMm: ppm,
+    whitePaths: [[[0, 0], [w, 0], [w, h], [0, h]]],
+    cutPaths: [[[0, 0], [w, 0], [w, h], [0, h]]],
+    xMm: 0, yMm: 0, widthMm: w / ppm, heightMm: h / ppm, rot: 0,
+  };
+  const base = { sheetWidthMm: 400, sheetHeightMm: 300, items: [item], bases: [], whiteName: 'W', cutName: 'C' };
+  const ones = Buffer.from(await (await OutlinePDF.createSheet({ ...base, whiteTint: 100 })).arrayBuffer());
+  const half = Buffer.from(await (await OutlinePDF.createSheet({ ...base, whiteTint: 55 })).arrayBuffer());
+  assert.match(decodeContent(ones), /\/WhiteSpot cs\n1 scn/, '100% is a full plate');
+  assert.match(decodeContent(half), /\/WhiteSpot cs\n0\.55 scn/, 'tint becomes the /Separation component');
+  const layer = half.toString('latin1').match(/\/WhiteTint ([\d.]+)/);
+  assert.ok(layer, 'tint is recorded on the White layer');
+  assert.equal(Number(layer[1]), 55);
+});
+
+test('sheet writer keeps bezier cut segments instead of choking on them', async () => {
+  const ppm = 10, s = 20;
+  const seg = (x0, y0, x1, y1) => ['C', x0 + (x1 - x0) / 3, y0 + (y1 - y0) / 3, x0 + 2 * (x1 - x0) / 3, y0 + 2 * (y1 - y0) / 3, x1, y1];
+  const cut = [[0, 0], seg(0, 0, s * ppm, 0), seg(s * ppm, 0, s * ppm, s * ppm), seg(s * ppm, s * ppm, 0, s * ppm), seg(0, s * ppm, 0, 0)];
+  const blob = await OutlinePDF.createSheet({
+    sheetWidthMm: 400, sheetHeightMm: 300,
+    items: [{
+      artwork: fakeArtwork(s * ppm, s * ppm), width: s * ppm, height: s * ppm, pixelsPerMm: ppm,
+      whitePaths: [[[20, 20], [180, 20], [180, 180]]], cutPaths: [cut],
+      xMm: 10, yMm: 10, widthMm: s, heightMm: s,
+    }],
+    bases: [], whiteName: 'MyWhite', cutName: 'MyCut',
+  });
+  const buf = Buffer.from(await blob.arrayBuffer());
+  const raw = buf.toString('latin1');
+  const streams = [];
+  const re = /stream\n/g;
+  let m;
+  while ((m = re.exec(raw))) {
+    const start = m.index + m[0].length;
+    const end = raw.indexOf('\nendstream', start);
+    if (end < 0) break;
+    const chunk = buf.slice(start, end);
+    let text;
+    try { text = zlib.inflateSync(chunk).toString('latin1'); } catch (_) { text = chunk.toString('latin1'); }
+    streams.push(text);
+  }
+  const content = streams.find((t) => t.includes('Artwork0')) || '';
+  assert.ok(content.length > 0, 'content stream found');
+  assert.ok(!content.includes('NaN'), 'no NaN coordinates in the content stream');
+  assert.match(content, / c\n/, 'bezier operators survive into the sheet');
 });

@@ -8,6 +8,7 @@
   <script defer src="vendor/clipper.js"></script>
   <script defer src="pdf.js"></script>
   <script defer src="scaffold-rules.js"></script>
+  <script defer src="cut-vector.js"></script>
   <script defer src="nesting-geometry.js"></script>
   <script defer src="nesting.js"></script>
   <script defer src="pdf-import.js"></script>
@@ -16,157 +17,228 @@
   <script defer src="batch-store.js"></script>
   <script defer src="app.js"></script>
 </head>
-<body data-flow-stage="1">
+<body>
   <header class="topbar">
-    <div class="brand"><span class="brand-mark">O</span><div><strong>Outline Studio</strong><small>Cutline pipeline · browser only</small></div></div>
-    <div class="local-badge"><span class="pulse"></span> LOCAL ONLY <span class="divider">·</span> 파일은 기기 밖으로 전송되지 않습니다</div>
+    <div class="brand"><span class="brand-mark">O</span><div><strong>Outline Studio</strong><small>인쇄용 외곽선 · 화이트 · 칼선</small></div></div>
+    <div class="local-badge"><span class="pulse"></span> 파일은 이 브라우저 밖으로 나가지 않습니다</div>
   </header>
 
   <main class="shell">
     <nav class="workflow-nav" aria-label="작업 단계">
-      <button id="workflowStep1" class="workflow-step active" aria-current="step"><span>1</span> 업로드 · 세부설정</button>
-      <button id="workflowStep2" class="workflow-step" disabled><span>2</span> 미리보기 · 편집 · 내보내기</button>
+      <button id="workflowStep1" class="workflow-step active" aria-current="step" data-goto="stepUpload"><span class="step">01</span> 업로드</button>
+      <button id="workflowStep2" class="workflow-step" data-goto="stepSettings"><span class="step">02</span> 세부설정</button>
+      <button id="workflowStep3" class="workflow-step" disabled data-goto="stepEdit"><span class="step">03</span> 편집</button>
+      <button id="workflowStep4" class="workflow-step" disabled data-goto="exportPanel"><span class="step">04</span> 내보내기</button>
     </nav>
     <div id="batchQueueBar" class="batch-queue-bar hidden" aria-live="polite"></div>
     <aside class="sidebar">
-      <section class="card">
-        <div class="section-title"><span class="step">01</span><div><h2>이미지 입력</h2><p>투명 배경 PNG 권장</p></div></div>
+      <section class="card" id="stepUpload">
+        <div class="section-title"><span class="step">01</span><div><h2>이미지</h2><p>배경이 투명한 PNG · WEBP</p></div></div>
         <label id="dropZone" class="drop-zone" for="fileInput">
           <input id="fileInput" type="file" accept="image/png,image/webp" multiple />
-          <span class="upload-icon">↑</span><strong>이미지를 끌어놓거나 클릭</strong><small>처리는 전부 이 브라우저 안에서 수행</small>
+          <span class="upload-icon">↑</span><strong>이미지를 끌어놓거나 클릭</strong><small>여러 장을 넣으면 한 번에 처리합니다</small>
         </label>
         <div id="fileMeta" class="file-meta hidden"></div>
         <button id="batchProcessBtn" class="batch-process-button hidden" disabled>전체 이미지 처리</button>
+        <button id="processBtn" class="primary-button" disabled><span>▶</span> 외곽선 만들기</button>
+        <div id="pipelineStatus" class="status-line">이미지를 넣으면 시작할 수 있습니다.</div>
+        <p id="whiteInfo" class="micro-note hidden" aria-live="polite"></p>
       </section>
 
-      <section class="card">
-        <div class="section-title"><span class="step">02</span><div><h2>파이프라인</h2><p>확정 규칙 · mm 단위</p></div></div>
-        <label class="check-row" for="flipX"><input id="flipX" type="checkbox" /> 좌우 반전 <span class="micro-note-inline">파이프라인 실행 전에 원본을 반전</span></label>
-        <div class="setting-row"><label for="offsetInput">외곽 여유</label><div class="input-with-unit"><input id="offsetInput" type="number" min="0" max="10" step="0.1" value="2"/><span>mm</span></div></div>
-        <div class="setting-row"><label for="heightInput">최종 높이 (탭 포함)</label><div class="input-with-unit"><input id="heightInput" type="number" min="50" max="400" step="0.1" value="148.5"/><span>mm</span></div></div>
-        <div class="setting-row"><label for="webInput">목 보강 웹 폭</label><div class="input-with-unit"><input id="webInput" type="number" min="4" max="30" step="0.5" value="10"/><span>mm</span></div></div>
-        <div class="setting-row"><label for="gapInput">국소 gap-fill</label><div class="input-with-unit"><input id="gapInput" type="number" min="0" max="12" step="0.5" value="4"/><span>mm</span></div></div>
-        <div class="scaffold-card">
-          <div class="scaffold-head"><span>중앙 스캐폴드 <i>자동</i></span><output id="scaffoldWidth" aria-live="polite">처리 후 계산</output></div>
-          <p id="scaffoldMeta">오프셋·보강 후 아웃라인 폭에 따라 결정</p>
-          <p id="tabWarning" class="tab-warning hidden" role="status"></p>
-          <details class="scaffold-tiers"><summary>자동 형상 규칙 보기</summary>
-            <table><thead><tr><th>아웃라인 폭 W</th><th>스캐폴드</th></tr></thead><tbody>
-              <tr><td>W &lt; 50 mm</td><td>둥근 정삼각형 · 기준 변 47 mm</td></tr>
-              <tr><td>W ≥ 50 mm</td><td>둥근 사각형 · 폭 47 mm</td></tr>
-            </tbody></table>
-            <p>W는 오프셋·목 보강 후, 스캐폴드를 합치기 전 본품 아웃라인 전체 폭입니다. 두 형상의 모서리 반경은 R1mm입니다.</p>
-            <p>정삼각형의 기준 변 47mm는 둥글리기 전 변이며, 둥글린 후 외형 폭은 약 45.54mm입니다. 꼭짓점을 위로, 밑변을 본품 하단에 맞춥니다. 사각형 높이는 본품 아웃라인 전체 높이입니다.</p>
-            <p>본품 실루엣은 유지하고 상단 1/3에 닿지 않는 스캐폴드 조각만 합칩니다. 최종 칼선 치수는 조각 선별·후처리와 래스터 격자에 따라 달라질 수 있습니다.</p>
+      <section class="card" id="stepSettings">
+        <div class="section-title"><span class="step">02</span><div><h2>설정</h2><p>모두 이 한 곳에서</p></div></div>
+
+        <div class="settings-group">
+          <h3 class="group-title">형태</h3>
+          <label class="check-row" for="flipX"><input id="flipX" type="checkbox" /> 좌우 반전 <span class="micro-note-inline">원본을 뒤집은 뒤 시작</span></label>
+          <div class="setting-row"><label for="heightInput">최종 높이</label><div class="input-with-unit"><input id="heightInput" type="number" min="50" max="400" step="0.1" value="148.5"/><span>mm</span></div></div>
+          <div class="setting-row"><label for="offsetInput">외곽 여유</label><div class="input-with-unit"><input id="offsetInput" type="number" min="0" max="10" step="0.1" value="2"/><span>mm</span></div></div>
+          <div class="setting-row"><label for="webInput">목 보강 폭</label><div class="input-with-unit"><input id="webInput" type="number" min="4" max="30" step="0.5" value="10"/><span>mm</span></div></div>
+          <div class="setting-row"><label for="gapInput">틈 메우기</label><div class="input-with-unit"><input id="gapInput" type="number" min="0" max="12" step="0.5" value="4"/><span>mm</span></div></div>
+          <div class="scaffold-card">
+            <div class="scaffold-head"><span>중앙 받침대 <i>자동</i></span><output id="scaffoldWidth" aria-live="polite">처리 후 계산</output></div>
+            <p id="scaffoldMeta">오프셋·보강 후 아웃라인 폭에 따라 결정</p>
+            <p id="tabWarning" class="tab-warning hidden" role="status"></p>
+          </div>
+          <details class="advanced"><summary>세부 조정 <span class="micro-note-inline">보통 건드리지 않아도 됩니다</span></summary>
+            <div class="setting-row"><label>탭 폭 × 깊이</label><div class="input-pair"><input id="tabWidthInput" type="number" value="30" min="10" max="60"/><b>×</b><input id="tabDepthInput" type="number" value="3" min="1" max="10"/><span>mm</span></div></div>
+            <div class="setting-row"><label>탭 끝 테이퍼 / R</label><div class="input-pair"><input id="taperInput" type="number" value="1" min="0" max="5" step="0.1"/><input id="tipRadiusInput" type="number" value="0.75" min="0" max="3" step="0.05"/><span>mm</span></div></div>
+            <div class="setting-row"><label>작은 조각 제거</label><div class="input-with-unit"><input id="speckInput" type="number" value="1" min="0" max="20" step="0.1"/><span>mm²</span></div></div>
+            <div class="setting-row"><label>알파 임계값</label><div class="input-with-unit"><input id="alphaInput" type="number" value="8" min="1" max="254"/><span>α</span></div></div>
+            <details class="scaffold-tiers"><summary>자동 형상 규칙</summary>
+              <table><thead><tr><th>아웃라인 폭 W</th><th>받침대</th></tr></thead><tbody>
+                <tr><td>W &lt; 50 mm</td><td>둥근 정삼각형 · 기준 변 47 mm</td></tr>
+                <tr><td>W ≥ 50 mm</td><td>둥근 사각형 · 폭 47 mm</td></tr>
+              </tbody></table>
+              <p>W는 오프셋·목 보강 후, 받침대를 합치기 전 본품 아웃라인 전체 폭입니다. 모서리 반경은 1mm입니다.</p>
+            </details>
           </details>
         </div>
-        <details class="advanced"><summary>센터탭 상세값</summary>
-          <div class="setting-row"><label>탭 폭 × 깊이</label><div class="input-pair"><input id="tabWidthInput" type="number" value="30" min="10" max="60"/><b>×</b><input id="tabDepthInput" type="number" value="3" min="1" max="10"/><span>mm</span></div></div>
-          <div class="setting-row"><label>탭 끝 테이퍼 / R</label><div class="input-pair"><input id="taperInput" type="number" value="1" min="0" max="5" step="0.1"/><input id="tipRadiusInput" type="number" value="0.75" min="0" max="3" step="0.05"/><span>mm</span></div></div>
-          <div class="setting-row"><label>작은 조각 제거</label><div class="input-with-unit"><input id="speckInput" type="number" value="1" min="0" max="20" step="0.1"/><span>mm²</span></div></div>
-          <div class="setting-row"><label>알파 임계값</label><div class="input-with-unit"><input id="alphaInput" type="number" value="8" min="1" max="254"/><span>α</span></div></div>
-        </details>
-        <button id="processBtn" class="primary-button" disabled><span>▶</span> 파이프라인 실행</button>
-        <div id="pipelineStatus" class="status-line">이미지를 선택하면 시작할 수 있습니다.</div>
-        <ol class="pipeline-list">
-          <li>알파 마스크 · 잔여물/홀 정리</li><li>바깥 오프셋 · 목 보강 웹</li><li>스캐폴드 조각 선별 · 국소 gap-fill</li><li>탭 직결 · 단일 외곽 검증</li>
-        </ol>
-      </section>
 
-      <section class="card spot-card">
-        <div class="section-title"><span class="step">03</span><div><h2>화이트 · 인쇄 스팟</h2><p>별색 분판 및 칼선 설정</p></div></div>
-        <div class="choke-note"><span class="choke-dot"></span><span><strong>알파 기준 0.15 mm 안쪽 침식</strong><small>작은 아일랜드 제거 후 벡터화 · 투명 홀 유지</small></span></div>
-        <label class="field-label" for="whiteSwatch">화이트 스와치</label>
-        <select id="whiteSwatch" class="field-control">
-          <option value="rdg_white">rdg_white</option>
-          <option value="white">white</option>
-          <option value="spot_0">spot_0</option>
-          <option value="custom">직접 입력</option>
-        </select>
-        <div id="whiteCustomWrap" class="hidden">
-          <label class="field-label" for="whiteCustom">화이트 스와치 이름</label>
-          <input id="whiteCustom" class="field-control" type="text" maxlength="127" placeholder="예: White_Ink" autocomplete="off" />
+        <div class="settings-group">
+          <h3 class="group-title">화이트 · 칼선</h3>
+          <label class="check-row" for="whitePreview"><input id="whitePreview" type="checkbox" checked /> 화이트 영역 화면에 표시</label>
         </div>
-        <label class="field-label" for="cutSwatch">칼선 스와치 이름</label>
-        <input id="cutSwatch" class="field-control" type="text" maxlength="127" value="CutContour" autocomplete="off" />
-        <label class="check-row" for="whitePreview"><input id="whitePreview" type="checkbox" checked /> 편집 화면에 화이트 영역 표시</label>
-        <p id="whiteInfo" class="micro-note" aria-live="polite">작은 조각 제거 기준과 알파 임계값은 파이프라인 설정을 사용합니다.</p>
-        <p class="micro-note">스팟 이름은 장비 설정과 대소문자까지 일치시켜 주세요. 영문·숫자·일반 기호만 사용할 수 있습니다.</p>
-      </section>
 
-      <section class="card export-card">
-        <div class="section-title"><span class="step">04</span><div><h2>내보내기</h2><p>수정된 외곽과 화이트 기준</p></div></div>
-        <label class="field-label" for="outputName">저장 파일명 <span>(확장자 제외)</span></label>
-        <input id="outputName" class="field-control filename-control" type="text" value="outline-studio" maxlength="120" autocomplete="off" />
-        <div class="export-buttons"><button id="pdfBtn" class="export-primary" disabled>PDF · 인쇄 스팟</button><button id="svgBtn" disabled>SVG 벡터</button><button id="pngBtn" disabled>PNG 미리보기</button><button id="jsonBtn" disabled>검사 JSON</button></div>
-        <p class="micro-note">PDF에는 화이트와 칼선이 별색 분판으로 저장됩니다. SVG·PNG는 스팟 분판이 아닌 미리보기입니다.</p>
-        <p class="micro-note">레이어: PDF의 Artwork/White/Cutline은 Acrobat·RIP용 OCG입니다. Illustrator는 PDF 레이어를 그대로 가져오지 않아 1레이어로 보입니다. Illustrator에서 3레이어로 쓰려면 SVG를 열어 Object → Release to Layers (Build)를 실행하세요.</p>
-        <p class="micro-note">일반 PDF 뷰어에서는 화이트가 그림을 가릴 수 있습니다. Acrobat 또는 RIP의 오버프린트·분판 미리보기로 확인하세요.</p>
-        <p class="micro-note">원본 색상은 RGB로 유지됩니다. 실제 출력 전 RIP에서 스팟 이름과 화이트 인쇄 순서를 확인하세요.</p>
-        <div class="setting-row"><label for="baseTolerance">베이스 슬릿 공차</label><div class="input-with-unit"><input id="baseTolerance" type="number" min="0" max="2.9" step="0.1" value="0.3"/><span>mm</span></div></div>
-        <p class="micro-note">35 × 35 mm · R3 · 슬릿 33 mm × (3 mm − 공차) · 45°</p>
-        <button id="baseSvgBtn" type="button">슬릿 베이스 SVG 저장</button>
-        <div class="nesting-box">
-          <div class="nesting-head"><strong>네스팅 시트 · 400 × 300 mm</strong><span id="nestingInfo">배치 결과 기준</span></div>
-          <p class="micro-note">처리된 이미지를 한 장에 배치합니다. 기존 이미지별 PDF는 그대로 유지되고, 네스팅은 별도 PDF로 저장됩니다. 남는 공간에는 35 × 35 mm 슬릿 베이스가 채워집니다.</p>
-          <ul class="micro-note nesting-rules">
-            <li>1행은 (1, 1)에서 시작해 <b>x = 399 mm</b>에서 끝나고, 넘치면 다음 행은 x = 1에서 이어집니다 (y = 299에서 마지막).</li>
-            <li>모든 아이템은 <b>긴 변이 세로</b>가 되게 정렬하고, 순서와 180° 회전을 바꿔가며 <b>가장 많이 들어가는 행</b>을 찾습니다.</li>
-            <li>간격은 바운딩 박스가 아니라 <b>실제 칼선 외곽선</b> 기준 0.25 mm입니다. 요철이 있으면 서로 물려 들어갑니다.</li>
-          </ul>
-          <label class="check-row" for="nestingBaseFill"><input id="nestingBaseFill" type="checkbox" checked /> 빈 공간에 슬릿 베이스 채우기</label>
-          <div class="nesting-buttons"><button id="nestingPreviewBtn" type="button">네스팅 미리보기</button><button id="nestingPdfBtn" type="button" class="export-primary">네스팅 시트 PDF 저장</button></div>
-          <div id="nestingPreview" class="nesting-preview hidden" aria-live="polite"></div>
-          <p id="nestingStatus" class="micro-note" aria-live="polite"></p>
-          <div class="pdf-import">
-            <div class="nesting-head"><strong>완성된 PDF 추가</strong><span id="pdfImportCount">0개</span></div>
-            <p class="micro-note">이미 완성된 개별 PDF를 네스팅에 추가합니다. 페이지 크기를 실제 칼선 크기로 읽고, 아트워크 이미지·화이트·칼선을 PDF 안에서 그대로 가져와 배치합니다. PNG 파이프라인을 거치지 않습니다.</p>
-            <label class="pdf-drop" for="pdfImportInput">
-              <input id="pdfImportInput" type="file" accept="application/pdf,.pdf" multiple />
-              <span>PDF 끌어놓기 / 선택</span>
-            </label>
-            <ul id="pdfImportList" class="pdf-import-list" aria-live="polite"></ul>
-            <div class="nesting-buttons single"><button id="pdfImportClear" type="button">가져온 PDF 비우기</button></div>
-            <div id="swatchReport" class="swatch-report hidden" aria-live="polite"></div>
-            <div class="nesting-buttons single"><button id="swatchUnify" type="button">스와치 이름 통일</button></div>
-          </div>
+        <div class="settings-group">
+          <h3 class="group-title">시트 · 베이스</h3>
+          <div class="setting-row"><label>시트 크기</label><div class="input-pair sheet-size"><input id="sheetW" type="number" min="50" max="2000" step="1" value="400" aria-label="시트 가로"/><b>×</b><input id="sheetH" type="number" min="50" max="2000" step="1" value="300" aria-label="시트 세로"/><span>mm</span></div></div>
+          <div class="setting-row"><label for="sheetGap">개체 간격</label><div class="input-with-unit"><input id="sheetGap" type="number" min="0" max="10" step="0.05" value="0.25"/><span>mm</span></div></div>
+          <details class="advanced"><summary>배치 탐색 <span class="micro-note-inline">전략 실험</span></summary>
+            <div class="setting-row"><label for="packOrder">배치 순서</label>
+              <select id="packOrder" class="field-control">
+                <option value="input">입력 순서</option>
+                <option value="auto" selected>자동 · 적은 시트 채택</option>
+                <option value="size-desc">큰 항목 우선</option>
+                <option value="size-asc">작은 항목 우선</option>
+              </select>
+            </div>
+            <div class="setting-row"><label for="packPrecision">탐색 정밀도</label>
+              <select id="packPrecision" class="field-control">
+                <option value="fast">빠름</option>
+                <option value="standard" selected>표준</option>
+                <option value="thorough">정밀</option>
+              </select>
+            </div>
+            <label class="check-row" for="packAbsorb"><input id="packAbsorb" type="checkbox" /> 마지막 시트 앞 시트로 흡수 <span class="micro-note-inline">실험</span></label>
+            <p class="micro-note">17개 이상 배치에서 측정한 결과입니다. 어느 순서가 이기는지는 잡마다 달라서, 자동은 세 순서로 따로 싸 보고 시트가 적은 쪽을 채택합니다(보통 1배 — 면적 하한에 닿으면 즉시 중단, 최악 3배 · 동률은 입력 순서 유지). 큰 항목 우선만 쓰면 오히려 늘 수 있고(−3 / +9), 작은 항목 우선도 62종 실측에서 시트를 1장 늘렸으며, 정밀과 흡수는 시트를 줄이지 못하고 시간만 1.3배 · 6배 씁니다. 자동이 기본값이고, 동률 때는 입력 순서 결과를 그대로 씁니다.</p>
+          </details>
+          <label class="check-row" for="nestingBaseFill"><input id="nestingBaseFill" type="checkbox" checked /> 빈 곳에 슬릿 베이스 채우기</label>
+          <div class="setting-row"><label for="baseTolerance">베이스 슬릿 공차</label><div class="input-with-unit"><input id="baseTolerance" type="number" min="0" max="2.9" step="0.1" value="0.3"/><span>mm</span></div></div>
+          <p class="micro-note">35 × 35 mm · R3 · 슬릿 33 × 2.7 mm · 45°</p>
         </div>
+
       </section>
-      <footer class="side-foot">No accounts · No network calls · Local file processing</footer>
     </aside>
 
     <section class="workspace">
-      <div class="workspace-head">
-        <div><div class="eyebrow">WORKSPACE</div><h1>외곽선 편집</h1><p>브러시로 살을 더하고, 지우개로 외곽을 직접 다듬으세요.</p></div>
-        <div class="view-actions"><button id="fitBtn" class="ghost-button" disabled>화면 맞춤</button><button id="undoBtn" class="ghost-button" disabled>↶ 실행 취소</button><button id="resetEditsBtn" class="ghost-button" disabled>자동 결과로 되돌리기</button></div>
+      <div class="workspace-head" id="stepEdit">
+        <div class="ws-title"><span class="step">03</span><div><h1>편집</h1><p>브러시로 살을 더하고, 지우개로 깎아냅니다.</p></div></div>
+        <div class="view-actions">
+          <button id="fitBtn" class="ghost-button" disabled>화면 맞춤</button>
+          <button id="undoBtn" class="ghost-button" disabled>↶ 되돌리기</button>
+          <button id="resetEditsBtn" class="ghost-button" disabled>자동 결과로</button>
+        </div>
       </div>
+
       <div class="editor-toolbar">
         <div class="tool-group">
           <button id="brushTool" class="tool-button active" disabled><span class="tool-dot brush-dot"></span>브러시</button>
           <button id="eraserTool" class="tool-button" disabled><span class="tool-dot eraser-dot"></span>지우개</button>
         </div>
-        <div class="layer-toggles" aria-label="미리보기 레이어">
-          <button class="layer-toggle active" data-layer="art" aria-pressed="true" title="아트워크 표시"><span class="eye">◉</span> 아트</button>
-          <button class="layer-toggle active" data-layer="white" aria-pressed="true" title="화이트 스팟 표시"><span class="eye">◉</span> 화이트</button>
-          <button class="layer-toggle active" data-layer="cut" aria-pressed="true" title="칼선 표시"><span class="eye">◉</span> 칼선</button>
+        <div class="layer-toggles" aria-label="표시 항목">
+          <button class="layer-toggle active" data-layer="art" aria-pressed="true"><span class="eye">◉</span> 아트</button>
+          <button class="layer-toggle active" data-layer="white" aria-pressed="true"><span class="eye">◉</span> 화이트</button>
+          <button class="layer-toggle active" data-layer="cut" aria-pressed="true"><span class="eye">◉</span> 칼선</button>
         </div>
-        <div class="brush-size"><label for="brushSize">도구 폭</label><input id="brushSize" type="range" min="1" max="20" step="0.5" value="10" disabled/><output id="brushSizeText">10 mm</output></div>
-        <div class="color-key"><span><i class="key-outline"></i>절단 외곽</span><span><i class="key-added"></i>재료 영역</span><span><i class="key-white"></i>화이트 스팟</span></div>
+        <div class="edit-tint" title="이 작업(배치 항목) 오브젝트의 화이트 농도. 100%는 완전 불투명, 낮추면 반투명 화이트로 인쇄됩니다.">
+          <label for="editWhiteTint" id="editTintLabel">화이트 농도</label>
+          <input id="editWhiteTint" type="range" min="0" max="100" step="1" value="100" disabled aria-label="화이트 농도"/>
+          <output id="editWhiteTintText">100%</output>
+        </div>
+        <div class="brush-size"><label for="brushSize">브러시</label><input id="brushSize" type="range" min="1" max="20" step="0.5" value="10" disabled/><output id="brushSizeText">10 mm</output></div>
+        <div class="color-key"><span><i class="key-outline"></i>외곽</span><span><i class="key-added"></i>추가</span><span><i class="key-white"></i>화이트</span></div>
       </div>
+
       <div id="canvasWrap" class="canvas-wrap empty-state">
-        <div id="emptyMessage" class="empty-message"><div class="empty-art">⌁</div><h2>이미지를 선택해 시작하세요</h2><p>이미지 입력 영역에서 투명 PNG 또는 WEBP를 선택한 뒤 파이프라인을 실행하세요.</p></div>
+        <div id="emptyMessage" class="empty-message"><div class="empty-art">⌁</div><h2>이미지를 넣어 시작하세요</h2><p>왼쪽에서 PNG 또는 WEBP를 넣고 <b>외곽선 만들기</b>를 누르면 여기에 나타납니다.</p></div>
         <canvas id="editorCanvas" aria-label="외곽선 편집 캔버스"></canvas>
       </div>
+
       <div class="metrics-bar">
         <div><span>상태</span><strong id="metricStatus">대기</strong></div>
-        <div><span>최종 크기</span><strong id="metricSize">—</strong></div>
-        <div><span>연결 성분</span><strong id="metricComponents">—</strong></div>
-        <div><span>내부 홀</span><strong id="metricHoles">—</strong></div>
-        <div><span>보강 웹</span><strong id="metricWebs">—</strong></div>
+        <div><span>크기</span><strong id="metricSize">—</strong></div>
+        <div><span>조각</span><strong id="metricComponents">—</strong></div>
+        <div><span>구멍</span><strong id="metricHoles">—</strong></div>
+        <div><span>보강</span><strong id="metricWebs">—</strong></div>
       </div>
-      <div class="notice"><b>안전 메모</b> 이 도구는 형상 검사·편집 도구입니다. 실제 재료, 출력 방향, 두께에 따른 강도는 시제품으로 확인해야 합니다.</div>
+
+      <details class="panel expo" id="exportPanel" open>
+        <summary><span class="step">04</span><h2>내보내기</h2><span id="expoSummary" class="panel-hint">PDF · SVG · PNG</span></summary>
+        <div class="export-mode" role="group" aria-label="내보내기 형식">
+          <button id="modeSingle" class="mode-button active" type="button" aria-pressed="true">단품</button>
+          <button id="modeSheet" class="mode-button" type="button" aria-pressed="false">네스팅 시트</button>
+        </div>
+        <div class="expo-names">
+          <h3 class="group-title">내보내기 이름</h3>
+          <div class="setting-row"><label for="outputName">파일명</label>
+            <input id="outputName" class="field-control" type="text" value="outline-studio" maxlength="120" autocomplete="off" />
+          </div>
+          <div class="setting-row"><label for="whiteSwatch">화이트 스와치</label>
+            <select id="whiteSwatch" class="field-control">
+              <option value="spot_1" selected>spot_1</option>
+              <option value="rdg_white">rdg_white</option>
+              <option value="white">white</option>
+              <option value="custom">직접 입력</option>
+            </select>
+          </div>
+          <div id="whiteCustomWrap" class="hidden">
+            <input id="whiteCustom" class="field-control" type="text" maxlength="127" placeholder="예: White_Ink" autocomplete="off" aria-label="화이트 스와치 이름" />
+          </div>
+          <div class="setting-row"><label for="cutSwatch">칼선 스와치</label>
+            <input id="cutSwatch" class="field-control" type="text" maxlength="127" value="CutContour" autocomplete="off" />
+          </div>
+          <p class="micro-note">단품·네스팅 시트 모두 <b>저장 시점</b>의 이 이름이 적용됩니다. 파일명은 항목마다 따로 기억되고, 가져온 PDF의 기존 스와치는 무시됩니다.</p>
+        </div>
+
+        <div id="singleExportBox">
+          <div class="export-buttons">
+            <button id="pdfBtn" class="export-primary" disabled>PDF 저장</button>
+            <button id="svgBtn" disabled>SVG</button>
+            <button id="pngBtn" disabled>PNG</button>
+            <button id="jsonBtn" disabled>검사 JSON</button>
+          </div>
+          <p class="micro-note">PDF에는 <b>Artwork · White · Cutline</b> 세 레이어가 CMYK 별색으로 들어갑니다.</p>
+        </div>
+
+        <div id="sheetExportBox" hidden>
+          <p class="micro-note sheet-size-note"><span id="nestSummaryText">배치</span></p>
+          <div class="nest-step">
+            <h3>1 · 완성된 PDF 추가 <span class="micro-note-inline">선택</span></h3>
+            <label class="pdf-drop" for="pdfImportInput">
+              <input id="pdfImportInput" type="file" accept="application/pdf,.pdf" multiple />
+              <span>PDF 끌어놓기 / 선택</span>
+            </label>
+            <ul id="pdfImportList" class="pdf-import-list" aria-live="polite"></ul>
+            <div class="nest-inline" id="pdfImportCountWrap"><span id="pdfImportCount">0개</span><button id="pdfImportClear" type="button" class="ghost-button small">비우기</button></div>
+          </div>
+
+          <div class="nest-step">
+            <h3>2 · 배치</h3>
+            <div class="nesting-buttons">
+              <button id="nestingPreviewBtn" type="button">자동 배치</button>
+              <button id="nestingPdfBtn" type="button" class="export-primary">시트 PDF 저장</button>
+            </div>
+            <p id="nestingStatus" class="micro-note" aria-live="polite"></p>
+          </div>
+
+          <div class="nest-step" id="nestEditStep" hidden>
+            <h3>3 · 손으로 고치기</h3>
+            <p class="micro-note">시트에서 개체를 끌어 옮기거나, 선택해서 방향을 돌리고 지울 수 있습니다. 빈 곳을 누르면 베이스가 추가됩니다.</p>
+            <div class="nest-toolbar">
+              <div class="nest-tools">
+                <button id="nestToolSelect" class="tool-button active" type="button">선택</button>
+                <button id="nestToolBase" class="tool-button" type="button">베이스 추가</button>
+              </div>
+              <button id="nestRotateBtn" class="ghost-button" type="button" disabled>90° 회전</button>
+              <button id="nestFlipBtn" class="ghost-button" type="button" disabled>180°</button>
+              <button id="nestDeleteBtn" class="ghost-button danger" type="button" disabled>삭제</button>
+              <button id="nestResetBtn" class="ghost-button" type="button">자동 배치로</button>
+            </div>
+            <div id="nestingPreview" class="nesting-preview hidden" aria-live="polite"></div>
+            <div class="nest-add-base">
+              <label for="extraBaseCount">베이스</label>
+              <button id="baseMinus" class="ghost-button small" type="button">−</button>
+              <input id="extraBaseCount" type="number" min="0" max="200" step="1" value="0" />
+              <button id="basePlus" class="ghost-button small" type="button">+</button>
+              <span class="micro-note-inline" id="baseCountNote">자동으로 채운 베이스에 더합니다</span>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <div class="notice"><b>참고</b> 이 도구는 형상 검사·편집 도구입니다. 실제 재료와 두께에 따른 강도는 시제품으로 확인하세요.</div>
     </section>
-  </main>
   <div id="toast" class="toast" role="status"></div>
 </body>
 </html>

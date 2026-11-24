@@ -165,3 +165,18 @@ test('every editing entry point runs under the editor lock', () => {
   assert.ok(/withEditor\(\(\)=>selectBatchItem/.test(APP), 'tab clicks are serialised');
   assert.ok(/withEditor\(async\(\)=>\{await processPipeline/.test(APP), 'manual run is serialised');
 });
+
+// ---------------------------------------------------------------- per-item white tint
+test('BatchStore.update merges per-item fields such as whiteTint', () => {
+  const s = new BatchStore(2);
+  assert.equal(s.update(0, { whiteTint: 40 }), false, 'empty slot rejects updates');
+  s.put(0, { name: 'a', maskRle: 'x' });
+  assert.equal(s.update(0, { whiteTint: 40 }), true);
+  assert.equal(s.get(0).whiteTint, 40);
+  assert.equal(s.get(0).name, 'a', 'other fields survive');
+  assert.equal(s.ref(0).whiteTint, 40);
+  assert.equal(s.ref(7), undefined);
+  const patched = s.get(0);
+  patched.whiteTint = 1;
+  assert.equal(s.ref(0).whiteTint, 40, 'get() copies stay defensive');
+});

@@ -1,5 +1,10 @@
 'use strict';
 
+// The shared loop-format helpers live in cut-vector.js, which the app loads
+// before this file; unit tests require it explicitly. Without it the preview
+// degrades to flattened polygons instead of failing.
+const CV = typeof CutVector !== 'undefined' ? CutVector : null;
+
 /*
  * Outline-based row nesting engine (Illupdf `row_packing` semantics, browser port).
  *
@@ -320,8 +325,17 @@ function shapeKey(variant) {
 // packer believe the item was smaller than it is, so rows were too short and
 // bases landed on the part it could not see. Unioning the loops keeps the true
 // footprint while still letting a real hole stay a hole.
+// Command loops may carry cubic segments, but every geometry consumer in
+// here (Clipper union, polygon area, bounds, the base-fill raster) is
+// polygon-only. Flattening once at the gate keeps NaN out of all of them;
+// the exported sheet keeps the true beziers via CutVector.shiftLoops.
+function flattenLoop(loop, per) {
+  if (!Array.isArray(loop) || !loop.some((p) => p[0] === 'C')) return loop;
+  return typeof CutVector !== 'undefined' ? CutVector.flattenCubics(loop, per || 16) : loop.filter((p) => p[0] !== 'C');
+}
 function cutOutlineOf(item) {
-  const loops = Array.isArray(item.cutPaths) ? item.cutPaths.filter((p) => Array.isArray(p) && p.length >= 3) : [];
+  const loops = (Array.isArray(item.cutPaths) ? item.cutPaths.filter((p) => Array.isArray(p) && p.length >= 3) : [])
+    .map((loop) => flattenLoop(loop));
   if (!loops.length) return null;
 
   const C = getClipper();
@@ -395,6 +409,10 @@ function buildVariants(item, index, opts) {
   const simplifiedResults = pieces.map((loop) => simplifyPolygon(loop));
   const simplified = simplifiedResults.map((r) => r.points);
   const simplifyTol = simplifiedResults.reduce((a, r) => Math.max(a, r.tol), 0);
+  // Net cut area (outer loops minus holes). Unlike the bounding box this stays
+  // additive when two silhouettes interlock, which is what makes it a valid
+  // sheet-count lower bound further down.
+  const netAreaMm2 = Math.abs(simplified.reduce((a, loop) => a + polygonArea(loop), 0));
   const allRaw = simplified.flat();
   const minX = Math.min(...allRaw.map((p) => p[0]));
   const minY = Math.min(...allRaw.map((p) => p[1]));
@@ -444,7 +462,7 @@ function buildVariants(item, index, opts) {
       },
     });
   }
-  return { item, index, srcW, srcH, ppm, variants };
+  return { item, index, srcW, srcH, ppm, variants, areaMm2: netAreaMm2 };
 }
 
 // matrix (px -> sheet mm) for a placement, matching SVG matrix(a b c d e f)
@@ -548,11 +566,13 @@ function buildRow(pool, usableWidth, cache, opts) {
       }
     }
     if (!expanded.length) break;
+    // Narrow partial rows first: they leave room for one more item later.
     expanded.sort((a, b) => (b.placed.length - a.placed.length) || (a.widthMm - b.widthMm) || (a.heightMm - b.heightMm));
     beam = expanded.slice(0, Math.max(1, beamWidth));
   }
 
-  // 개수 우선, 그 다음 열의 끝 좌표가 짧은 쪽.
+  // Count first, then the NARROWEST row: a wider row only wins by rotating a
+  // tall piece sideways, and portrait normalisation is the standing rule.
   beam.sort((a, b) => (b.placed.length - a.placed.length) || (a.widthMm - b.widthMm) || (a.heightMm - b.heightMm));
   return beam[0];
 }
@@ -587,7 +607,7 @@ function buildObstacleGrid(placements, opts) {
     const polys = [];
     for (const loop of loops) {
       if (!Array.isArray(loop) || loop.length < 3) continue;
-      polys.push(loop.map(([x, y]) => {
+      polys.push(flattenLoop(loop, 8).map(([x, y]) => {
         const px = x + shift[0], py = y + shift[1];
         return [m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]];
       }));
@@ -873,6 +893,7 @@ function packNesting(items, options = {}) {
     fillBases: options.fillBases !== false,
     beamWidth: Number(options.beamWidth ?? DEFAULT_BEAM_WIDTH),
     candidateLimit: Number(options.candidateLimit ?? DEFAULT_CANDIDATE_LIMIT),
+    order: options.order === 'size-desc' || options.order === 'size-asc' ? options.order : 'input',
     allowLandscape: options.allowLandscape !== false,
   };
   if (!(opts.sheetWidthMm > 0) || !(opts.sheetHeightMm > 0)) throw new Error('시트 크기가 올바르지 않습니다.');
@@ -884,6 +905,18 @@ function packNesting(items, options = {}) {
     }
     return buildVariants(item, i, opts);
   });
+  // Optional global order. 'size-desc' lets tall pieces define the rows and
+  // small ones fill the gaps; 'size-asc' does the opposite, which matters when
+  // the candidate window is narrower than the pool. Input order stays the
+  // tie-break, so every setting is deterministic.
+  if (opts.order === 'size-desc' || opts.order === 'size-asc') {
+    const dir = opts.order === 'size-desc' ? -1 : 1;
+    const key = (b) => [Math.max(...b.variants.map((v) => v.heightMm)), Math.max(...b.variants.map((v) => v.widthMm))];
+    built.sort((a, b) => {
+      const [ha, wa] = key(a), [hb, wb] = key(b);
+      return dir * ((hb - ha) || (wb - wa)) || (a.index - b.index);
+    });
+  }
 
   const usableWidth = opts.sheetWidthMm - opts.marginMm * 2;
   const usableBottom = opts.sheetHeightMm - opts.marginMm;
@@ -949,7 +982,28 @@ function packNesting(items, options = {}) {
 
   for (const p of placements) p.matrix = placementMatrix(p);
 
-  const bases = opts.fillBases ? fillBases(placements, opts) : [];
+  let bases = opts.fillBases ? fillBases(placements, opts) : [];
+  // Operators sometimes need bases they cannot get from the automatic fill
+  // (a top-up run). `extraBases` asks for that many more; they go into pockets
+  // the first pass left empty so nothing overlaps.
+  const extra = Math.max(0, Math.trunc(Number(opts.extraBases) || 0));
+  if (extra) {
+    const pad = 0.3;
+    const free = (x, y) => {
+      for (const b of bases) if (x < b.xMm + 35 + pad && x + 35 + pad > b.xMm && y < b.yMm + 35 + pad && y + 35 + pad > b.yMm) return false;
+      for (const q of placements) if (x < q.xMm + q.widthMm + pad && x + 35 + pad > q.xMm && y < q.yMm + q.heightMm + pad && y + 35 + pad > q.yMm) return false;
+      return true;
+    };
+    const step = 35 + opts.clearanceMm;
+    let added = 0;
+    for (let y = opts.marginMm; y + 35 <= opts.sheetHeightMm - opts.marginMm && added < extra; y += step) {
+      for (let x = opts.marginMm; x + 35 <= opts.sheetWidthMm - opts.marginMm && added < extra; x += step) {
+        if (!free(x, y)) continue;
+        bases.push({ xMm: x, yMm: y, widthMm: 35, heightMm: 35 });
+        added++;
+      }
+    }
+  }
   const basisAvailable = opts.sheetWidthMm * opts.sheetHeightMm;
   const itemArea = placements.reduce((s, p) => s + p.widthMm * p.heightMm, 0);
   const baseArea = bases.length * opts.baseSizeMm * opts.baseSizeMm;
@@ -967,6 +1021,7 @@ function packNesting(items, options = {}) {
     bases,
     unplaced,
     usedHeightMm,
+    totalAreaMm2: built.reduce((a, b) => a + (b.areaMm2 || 0), 0),
     utilization: basisAvailable ? (itemArea + baseArea) / basisAvailable : 0,
     itemUtilization: basisAvailable ? itemArea / basisAvailable : 0,
   };
@@ -980,7 +1035,13 @@ function escapeXml(s) {
 function pathData(points) {
   if (!Array.isArray(points) || points.length < 3) return '';
   const r = (v) => Math.round(v * 1000) / 1000;
-  return 'M' + points.map((p) => `${r(p[0])} ${r(p[1])}`).join('L') + 'Z';
+  let d = `M${r(points[0][0])} ${r(points[0][1])}`;
+  for (const p of points.slice(1)) {
+    d += p[0] === 'C'
+      ? `C${r(p[1])} ${r(p[2])} ${r(p[3])} ${r(p[4])} ${r(p[5])} ${r(p[6])}`
+      : `L${r(p[0])} ${r(p[1])}`;
+  }
+  return d + 'Z';
 }
 
 function nestingPreviewSvg(result, opts = {}) {
@@ -1013,7 +1074,8 @@ function nestingPreviewSvg(result, opts = {}) {
     // Every loop is drawn, shifted onto the same normalised frame the packer sized.
     const shift = p.outlineShift || [0, 0];
     const cut = Array.isArray(p.cutPaths) && p.cutPaths.length
-      ? p.cutPaths.map((loop) => pathData(loop.map(([x, y]) => [x + shift[0], y + shift[1]]))).join('')
+      ? (CV ? CV.shiftLoops(p.cutPaths, shift[0], shift[1])
+        : p.cutPaths.map((loop) => flattenLoop(loop).map(([x, y]) => [x + shift[0], y + shift[1]]))).map(pathData).join('')
       : '';
     if (cut) inner.push(`<path d="${cut}" fill="none" stroke="#3465e8" stroke-width="${0.2 * (p.pixelsPerMm || 1)}" stroke-linejoin="round"/>`);
     // 방향 표시: 180° 회전하면 표시가 반대쪽 모서리로 간다.
@@ -1039,9 +1101,136 @@ if (typeof module !== 'undefined') {
   };
 }
 if (typeof window !== 'undefined') {
+  // Fill as many sheets as the job needs: whatever one sheet cannot hold
+  // becomes the input of the next. Items that can never fit a sheet (bigger
+  // than the sheet itself) stop the loop and are reported as unplaced.
+  function packSheets(items, opts) {
+    if (opts.order === 'auto') return packSheetsAuto(items, opts);
+    const sheets = [];
+    const unplaced = [];
+    let remaining = items.slice();
+    while (remaining.length) {
+      const result = packNesting(remaining, opts);
+      if (!result.placements.length) {
+        for (const u of result.unplaced) unplaced.push(u);
+        break;
+      }
+      const placed = new Set(result.placements.map((p) => p._idx));
+      const tooBig = new Set(result.unplaced.filter((u) => u.reason === 'sheet-size').map((u) => u._idx));
+      for (const u of result.unplaced) if (u.reason === 'sheet-size') unplaced.push(u);
+      sheets.push({ result, subset: remaining.slice() });
+      remaining = remaining.filter((it, i) => !placed.has(i) && !tooBig.has(i));
+    }
+    if (opts.absorbLastSheet) absorbLastSheet(sheets, opts);
+    return { sheets, unplaced };
+  }
+
+  // 'auto' packs the job once per global order and keeps whichever result uses
+  // the fewest sheets - the measurement showed the winning order differs per
+  // job, so the packer picks instead of the operator guessing. Ties keep the
+  // first plan (the input order), so a job no order improves is packed exactly
+  // as before, only three times. Unplaced pieces outrank sheet count: a plan
+  // that strands work never beats one that places everything.
+  const AUTO_PLANS = [{ order: 'input' }, { order: 'size-asc' }, { order: 'size-desc' }];
+  // Admissible lower bound on the sheet count. The simplified cut regions of
+  // two neighbours never overlap and all of them live inside the margin frame,
+  // so the summed NET CUT AREA can never exceed sheets * usable area. Bounding
+  // boxes do NOT work here: interlocking silhouettes overlap box-wise, and the
+  // 40 piece measurement packed into 4 sheets while the box bound claimed 5.
+  // Once a plan reaches the bound no later plan can beat it, and the tie rule
+  // would keep the earlier plan anyway - so the remaining packs are skipped.
+  function sheetLowerBound(result, opts) {
+    const usableW = opts.sheetWidthMm - opts.marginMm * 2;
+    const usableH = opts.sheetHeightMm - opts.marginMm * 2;
+    if (!(usableW > 0) || !(usableH > 0) || !(result.totalAreaMm2 > 0)) return 0;
+    return Math.max(1, Math.ceil(result.totalAreaMm2 / (usableW * usableH)));
+  }
+  function packSheetsAuto(items, opts) {
+    let best = null, bestKey = null, bound = 0;
+    for (const plan of AUTO_PLANS) {
+      const r = packSheets(items, { ...opts, ...plan });
+      const key = [r.unplaced.length, r.sheets.length];
+      if (!bestKey || key[0] < bestKey[0] || (key[0] === bestKey[0] && key[1] < bestKey[1])) {
+        best = r;
+        bestKey = key;
+      }
+      // The cut area is order independent, and the FIRST sheet's pack is fed the
+      // whole job (every later sheet only receives its leftovers), so that one
+      // totalAreaMm2 is the job-wide cut area and bounds every plan alike.
+      if (!bound && r.sheets.length) bound = sheetLowerBound(r.sheets[0].result, opts);
+      if (bestKey[0] === 0 && bestKey[1] <= bound) break;   // provably optimal
+    }
+    return best;
+  }
+
+  // Greedy rows can strand one or two pieces on a final sheet that a different
+  // row composition would have absorbed. Try exactly that: repack an earlier
+  // sheet together with the stranded pieces and keep the result ONLY when every
+  // single piece lands. The sheet count can therefore never grow, and nothing
+  // moves unless the whole merge succeeds — a failed merge is simply not applied.
+  function absorbLastSheet(sheets, opts) {
+    // The union is retried under both global orders: which one wins depends on
+    // the mix, and the input order is known to need one sheet too many.
+    const ORDERS = ['size-desc', 'size-asc'];
+    const bestOrder = (subset) => {
+      for (const order of ORDERS) {
+        // Probe without bases (cheap); bases are refilled once a merge is taken.
+        const probe = packNesting(subset, { ...opts, order, fillBases: false });
+        if (probe.placements.length === subset.length && !probe.unplaced.length) return order;
+      }
+      return null;
+    };
+    const repack = (subset) => {
+      const order = bestOrder(subset) || 'size-desc';
+      return { order, result: packNesting(subset, { ...opts, order }) };
+    };
+    // Every pass either drops a sheet or moves one piece, so this terminates.
+    let passes = sheets.length + sheets.reduce((a, s) => a + s.subset.length, 0) + 1;
+    while (sheets.length > 1 && passes-- > 0) {
+      const last = sheets[sheets.length - 1];
+      const targets = sheets.slice(0, -1).map((s, i) => i).filter((i) => !sheets[i].edited);
+      let merged = false;
+      for (const s of targets) {                              // 1. swallow the whole sheet
+        const subset = sheets[s].subset.concat(last.subset);
+        if (bestOrder(subset)) {
+          const { order, result } = repack(subset);
+          sheets[s] = { ...sheets[s], subset, result, edited: false };
+          sheets.pop();
+          merged = true;
+          break;
+        }
+      }
+      if (!merged) {
+        outer:
+        for (let i = last.subset.length - 1; i >= 0; i--) {    // 2. one piece at a time
+          const moved = last.subset[i];
+          const rest = last.subset.slice(0, i).concat(last.subset.slice(i + 1));
+          for (const s of targets) {
+            const subset = sheets[s].subset.concat([moved]);
+            if (bestOrder(subset)) {
+              const { result } = repack(subset);
+              sheets[s] = { ...sheets[s], subset, result, edited: false };
+              if (rest.length) {
+                last.subset = rest;
+                last.result = repack(rest).result;
+                last.edited = false;
+              } else sheets.pop();
+              merged = true;
+              break outer;
+            }
+          }
+        }
+      }
+      if (!merged) break;
+    }
+  }
+
   window.OutlineNesting = {
     SHEET, MARGIN_MM, CLEARANCE_MM, BASE_SIZE_MM, STEP_MM,
-    packNesting, nestingPreviewSvg, placementMatrix,
+    packNesting, packSheets, nestingPreviewSvg, placementMatrix,
+    // Exported so the merge rule can be tested directly: it is the only part of
+    // the search that rewrites a sheet list somebody else produced.
+    absorbLastSheet,
     exposeClipper, getClipper,
   };
 }

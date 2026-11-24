@@ -25,11 +25,74 @@
     for (let i = 0; i < value.length; i++) hex += value.charCodeAt(i).toString(16).toUpperCase().padStart(4, '0');
     return '<' + hex + '>';
   };
+  // ---------------------------------------------------------------------------
+  // Export contract. Every PDF this writer produces — single item or nesting
+  // sheet — follows the same shape:
+  //   layers  : exactly three, named Artwork / White / Cutline, empty ones dropped
+  //   plates  : /Separation spot colour spaces for white and cut
+  //   artwork : DeviceCMYK image + soft mask (no RGB left in the file)
+  //   overprint: white and cutline overprint, the opaque artwork knocks out
+  // ---------------------------------------------------------------------------
+  const LAYER = { art: 'Artwork', white: 'White', cut: 'Cutline' };
+  const LAYER_TAG = { art: 'ArtLayer', white: 'WhiteLayer', cut: 'CutLayer' };
+
+  // DeviceRGB -> DeviceCMYK. Naive conversion, but it keeps black text and
+  // outlines at pure K instead of a four-colour build, which is what a print
+  // shop expects from a spot-plate file.
+  function rgbToCmyk(r, g, b) {
+    const rf = r / 255, gf = g / 255, bf = b / 255;
+    const k = 1 - Math.max(rf, gf, bf);
+    if (k >= 1) return [0, 0, 0, 255];
+    const inv = 1 - k;
+    return [
+      Math.round(((1 - rf - k) / inv) * 255),
+      Math.round(((1 - gf - k) / inv) * 255),
+      Math.round(((1 - bf - k) / inv) * 255),
+      Math.round(k * 255),
+    ];
+  }
+  // White ink is printed at a tint, not always 100%. A /Separation colour space
+  // takes a single component 0..1 and maps it through C0->C1, so the tint simply
+  // becomes that component. `1 scn` was hard-coded, which forced every file to
+  // full white; the slider now drives it.
+  function tintComponent(percent) {
+    const p = Number(percent);
+    return Math.max(0, Math.min(1, (Number.isFinite(p) ? p : 100) / 100));
+  }
+  function toCmyk(pixels, count) {
+    const out = new Uint8Array(count * 4);
+    for (let i = 0, p = 0, q = 0; i < count; i++, p += 4, q += 4) {
+      const c = rgbToCmyk(pixels[p], pixels[p + 1], pixels[p + 2]);
+      out[q] = c[0]; out[q + 1] = c[1]; out[q + 2] = c[2]; out[q + 3] = c[3];
+    }
+    return out;
+  }
+  // Overprint only means something on a plate that would otherwise knock out
+  // what is underneath. The artwork image is opaque CMYK, so it must knock out;
+  // forcing overprint there would print the art over the white plate.
+  const GSTATE_OPAQUE = '/ArtOverprint << /Type /ExtGState /OP false /op false /OPM 1 /CA 1 /ca 1 >>';
+  const GSTATE_OVERPRINT = '/OverprintPlate << /Type /ExtGState /OP true /op true /OPM 1 >>';
+
   function vectorPath(paths) {
     return paths.filter((p) => p.length >= 3).map((path) => {
       const head = `${pdfNumber(path[0][0])} ${pdfNumber(path[0][1])} m`;
-      return head + '\n' + path.slice(1).map((p) => `${pdfNumber(p[0])} ${pdfNumber(p[1])} l`).join('\n') + '\nh';
+      return head + '\n' + path.slice(1).map((p) => (p[0] === 'C'
+        ? `${pdfNumber(p[1])} ${pdfNumber(p[2])} ${pdfNumber(p[3])} ${pdfNumber(p[4])} ${pdfNumber(p[5])} ${pdfNumber(p[6])} c`
+        : `${pdfNumber(p[0])} ${pdfNumber(p[1])} l`)).join('\n') + '\nh';
     }).join('\n');
+  }
+  // Compress one artwork's CMYK + alpha plates once, so callers can drop the
+  // full-res canvas right after. A 1440 dpi piece owns ~180 MB of canvas; the
+  // compressed plates are an order of magnitude smaller, which is what keeps a
+  // ten-design sheet job inside browser memory.
+  async function encodeArtwork(artwork, width, height) {
+    if (!artwork || !width || !height) throw new Error('PDF에 필요한 이미지 정보가 없습니다.');
+    const pixels = artwork.getContext('2d').getImageData(0, 0, width, height).data;
+    const alpha = new Uint8Array(width * height);
+    for (let i = 0, p = 3; i < alpha.length; i++, p += 4) alpha[i] = pixels[p];
+    const cmyk = toCmyk(pixels, alpha.length);
+    const [rgbStream, alphaStream] = await Promise.all([encodeStream(cmyk), encodeStream(alpha)]);
+    return { width, height, rgbStream, alphaStream };
   }
   async function encodeStream(bytes) {
     if (typeof CompressionStream === 'function') {
@@ -68,18 +131,17 @@
       return new Blob(parts, { type: 'application/pdf' });
     }
   }
-  async function create({ artwork, width, height, pixelsPerMm, whitePaths, cutPaths, whiteName, cutName }) {
+  async function create({ artwork, width, height, pixelsPerMm, whitePaths, cutPaths, whiteName, cutName, whiteTint = 100 }) {
     if (!artwork || !width || !height || !pixelsPerMm) throw new Error('PDF에 필요한 이미지 정보가 없습니다.');
     if (!whitePaths.length) throw new Error('화이트 영역이 없습니다. 작은 조각 제거 기준을 확인해 주세요.');
     if (!cutPaths.length) throw new Error('칼선이 비어 있습니다.');
     const pointScale = 72 / (25.4 * pixelsPerMm);
     const pageWidth = width * pointScale, pageHeight = height * pointScale;
     const pixels = artwork.getContext('2d').getImageData(0, 0, width, height).data;
-    const rgb = new Uint8Array(width * height * 3), alpha = new Uint8Array(width * height);
-    for (let i = 0, p = 0, q = 0; i < alpha.length; i++, p += 4, q += 3) {
-      rgb[q] = pixels[p]; rgb[q + 1] = pixels[p + 1]; rgb[q + 2] = pixels[p + 2]; alpha[i] = pixels[p + 3];
-    }
-    const [rgbStream, alphaStream] = await Promise.all([encodeStream(rgb), encodeStream(alpha)]);
+    const alpha = new Uint8Array(width * height);
+    for (let i = 0, p = 3; i < alpha.length; i++, p += 4) alpha[i] = pixels[p];
+    const cmyk = toCmyk(pixels, alpha.length);
+    const [rgbStream, alphaStream] = await Promise.all([encodeStream(cmyk), encodeStream(alpha)]);
     const scale = pdfNumber(pointScale), w = pdfNumber(pageWidth), h = pdfNumber(pageHeight);
     // Artwork is clipped to the cut outline, exactly like the nesting sheet.
     // The crop box is the cut bounding box, but brush edits, the scaffold or tab
@@ -93,8 +155,8 @@
     // White is painted as a named overprinting spot after the artwork.
     // A normal blend preserves the process plates in separating RIPs.
     // Use an overprint-aware viewer; actual ink order is set in the RIP.
-    const whiteCmd = `/OC /WhiteLayer BDC\nq\n/WhiteOverprint gs\n${scale} 0 0 -${scale} 0 ${h} cm\n/WhiteSpot cs\n1 scn\n${vectorPath(whitePaths)}\nf*\nQ\nEMC`;
-    const cutCmd = `/OC /CutLayer BDC\nq\n/CutOverprint gs\n${scale} 0 0 -${scale} 0 ${h} cm\n/CutSpot CS\n1 SCN\n${pdfNumber(0.2 * pixelsPerMm)} w\n1 J 1 j\n${vectorPath(cutPaths)}\nS\nQ\nEMC`;
+    const whiteCmd = `/OC /WhiteLayer BDC\nq\n/OverprintPlate gs\n${scale} 0 0 -${scale} 0 ${h} cm\n/WhiteSpot cs\n${pdfNumber(tintComponent(whiteTint))} scn\n${vectorPath(whitePaths)}\nf*\nQ\nEMC`;
+    const cutCmd = `/OC /CutLayer BDC\nq\n/OverprintPlate gs\n${scale} 0 0 -${scale} 0 ${h} cm\n/CutSpot CS\n1 SCN\n${pdfNumber(0.2 * pixelsPerMm)} w\n1 J 1 j\n${vectorPath(cutPaths)}\nS\nQ\nEMC`;
     const contents = await encodeStream(encode(`${artCmd}\n${whiteCmd}\n${cutCmd}\n`));
     const pdf = new PDFWriter();
     const catalog = pdf.reserve(), pages = pdf.reserve(), page = pdf.reserve(), contentId = pdf.reserve();
@@ -103,16 +165,17 @@
     pdf.set(catalog, `<< /Type /Catalog /Pages ${pages} 0 R /OCProperties << /OCGs [${layerRefs}] /D << /Name (Outline Studio) /BaseState /ON /ON [${layerRefs}] /Order [${layerRefs}] >> >> >>`);
     pdf.set(pages, `<< /Type /Pages /Kids [${page} 0 R] /Count 1 >>`);
     const colorSpaces = `/WhiteSpot [/Separation ${pdfName(whiteName)} /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0 0 0] /N 1 >>] /CutSpot [/Separation ${pdfName(cutName)} /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>]`;
-    const states = `/ArtOverprint << /Type /ExtGState /OP true /op true /OPM 1 >> /WhiteOverprint << /Type /ExtGState /OP true /op true /OPM 1 >> /CutOverprint << /Type /ExtGState /OP true /op true /OPM 1 >>`;
+    const states = `${GSTATE_OPAQUE} ${GSTATE_OVERPRINT}`;
     const resources = `<< /XObject << /Artwork ${imageId} 0 R >> /ColorSpace << ${colorSpaces} >> /ExtGState << ${states} >> /Properties << /ArtLayer ${artLayer} 0 R /WhiteLayer ${whiteLayer} 0 R /CutLayer ${cutLayer} 0 R >> >>`;
     pdf.set(page, `<< /Type /Page /Parent ${pages} 0 R /MediaBox [0 0 ${w} ${h}] /Resources ${resources} /Contents ${contentId} 0 R >>`);
     pdf.stream(contentId, contents.filter, contents.bytes);
-    pdf.stream(imageId, `/Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask ${alphaId} 0 R${rgbStream.filter}`, rgbStream.bytes);
+    pdf.stream(imageId, `/Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceCMYK /BitsPerComponent 8 /SMask ${alphaId} 0 R${rgbStream.filter}`, rgbStream.bytes);
     pdf.stream(alphaId, `/Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceGray /BitsPerComponent 8${alphaStream.filter}`, alphaStream.bytes);
     const layer = (name) => `<< /Type /OCG /Name ${pdfString(name)} /Usage << /View << /ViewState /ON >> /Print << /PrintState /ON >> >> >>`;
-    pdf.set(artLayer, layer('Artwork'));
-    pdf.set(whiteLayer, layer(`White spot: ${whiteName}`));
-    pdf.set(cutLayer, layer(`Cutline spot: ${cutName}`));
+    pdf.set(artLayer, layer(LAYER.art));
+    pdf.set(whiteLayer, `<< /Type /OCG /Name ${pdfString(LAYER.white)} /WhiteTint ${pdfNumber(tintComponent(whiteTint) * 100)} `
+      + `/Usage << /View << /ViewState /ON >> /Print << /PrintState /ON >> >> >>`);
+    pdf.set(cutLayer, layer(LAYER.cut));
     pdf.set(info, `<< /Producer (Outline Studio) /Creator (Outline Studio) >>`);
     return pdf.finish(catalog, info);
   }
@@ -124,23 +187,23 @@
   // Packing origin is top-left (y down); PDF origin is bottom-left (y up).
   // The item matrix maps artwork pixels -> sheet mm and mirrors placementMatrix()
   // in nesting.js so the sheet matches the on-screen preview exactly.
-  async function createSheet({ sheetWidthMm = 400, sheetHeightMm = 300, items, bases = [], whiteName, cutName }) {
+  async function createSheet({ sheetWidthMm = 400, sheetHeightMm = 300, items, bases = [], whiteName, cutName, whiteTint = 100 }) {
     if (!Array.isArray(items) || !items.length) throw new Error('네스팅 시트에 배치할 이미지가 없습니다.');
     if (!whiteName || !cutName) throw new Error('화이트·칼선 스팟 이름이 없습니다.');
     const ptPerMm = 72 / 25.4;
     const pageW = sheetWidthMm * ptPerMm, pageH = sheetHeightMm * ptPerMm;
     const prepared = [];
     for (const it of items) {
-      if (!it.artwork || !it.width || !it.height || !it.pixelsPerMm) throw new Error('PDF에 필요한 이미지 정보가 없습니다.');
+      if (!it.width || !it.height || !it.pixelsPerMm) throw new Error('PDF에 필요한 이미지 정보가 없습니다.');
       if (!it.whitePaths || !it.whitePaths.length) throw new Error('화이트 영역이 없습니다. 작은 조각 제거 기준을 확인해 주세요.');
       if (!it.cutPaths || !it.cutPaths.length) throw new Error('칼선이 비어 있습니다.');
-      const pixels = it.artwork.getContext('2d').getImageData(0, 0, it.width, it.height).data;
-      const rgb = new Uint8Array(it.width * it.height * 3), alpha = new Uint8Array(it.width * it.height);
-      for (let i = 0, p = 0, q = 0; i < alpha.length; i++, p += 4, q += 3) {
-        rgb[q] = pixels[p]; rgb[q + 1] = pixels[p + 1]; rgb[q + 2] = pixels[p + 2]; alpha[i] = pixels[p + 3];
-      }
-      const [rgbStream, alphaStream] = await Promise.all([encodeStream(rgb), encodeStream(alpha)]);
-      prepared.push({ ...it, rgbStream, alphaStream });
+      // Items may arrive pre-encoded (imports and batch rows drop the canvas as
+      // soon as the plates are compressed); encode here only when needed.
+      const enc = it.rgbStream && it.alphaStream
+        ? it
+        : it.pixels || (it._encoded || (it._encoded = await encodeArtwork(it.artwork, it.width, it.height)));
+      if (!enc.rgbStream || !enc.alphaStream) throw new Error('PDF에 필요한 이미지 정보가 없습니다.');
+      prepared.push({ ...it, rgbStream: enc.rgbStream, alphaStream: enc.alphaStream });
     }
     // Sheet-mm -> PDF-point matrix (y flip) for a placement, incl. its rotation.
     function placementMatrixPt(it) {
@@ -185,7 +248,7 @@
       // silhouette of the whole piece; emitting it AFTER the artwork buried the
       // artwork under it, which is why a saved sheet showed only the cut line. The
       // white layer has to go down first and the artwork on top of it.
-      cmds.push(`/OC /WhiteLayer BDC\nq\n/WhiteOverprint gs\n${mat} cm\n/WhiteSpot cs\n1 scn\n${vectorPath(it.whitePaths)}\nf*\nQ\nEMC`);
+      cmds.push(`/OC /WhiteLayer BDC\nq\n/OverprintPlate gs\n${mat} cm\n/WhiteSpot cs\n${pdfNumber(tintComponent(whiteTint))} scn\n${vectorPath(it.whitePaths)}\nf*\nQ\nEMC`);
       // The unit square has to be flipped as well as scaled. The shared `mat`
       // already flips mm->pt (y up), but the artwork is stored with row 0 at the
       // TOP of the picture while PDF image space puts v=0 at the bottom. Without
@@ -193,12 +256,12 @@
       // out of phase with its own cut line. `create()` does the same thing with
       // `width 0 0 -height 0 height`.
       cmds.push(`/OC /ArtLayer BDC\nq\n/ArtOverprint gs\n${mat} cm\n${vectorPath(it.cutPaths)}\nW* n\n${pdfNumber(it.width)} 0 0 -${pdfNumber(it.height)} 0 ${pdfNumber(it.height)} cm\n/Artwork${i} Do\nQ\nEMC`);
-      cmds.push(`/OC /CutLayer BDC\nq\n/CutOverprint gs\n${mat} cm\n/CutSpot CS\n1 SCN\n${pdfNumber(0.2 * it.pixelsPerMm)} w\n1 J 1 j\n${vectorPath(it.cutPaths)}\nS\nQ\nEMC`);
+      cmds.push(`/OC /CutLayer BDC\nq\n/OverprintPlate gs\n${mat} cm\n/CutSpot CS\n1 SCN\n${pdfNumber(0.2 * it.pixelsPerMm)} w\n1 J 1 j\n${vectorPath(it.cutPaths)}\nS\nQ\nEMC`);
     });
     for (const b of bases) {
       const xPt = b.xMm * ptPerMm;
       const yTopPt = (sheetHeightMm - b.yMm) * ptPerMm;
-      cmds.push(`/OC /CutLayer BDC\nq\n/CutOverprint gs\n${pdfNumber(ptPerMm)} 0 0 ${pdfNumber(-ptPerMm)} ${pdfNumber(xPt)} ${pdfNumber(yTopPt)} cm\n/CutSpot CS\n1 SCN\n${pdfNumber(0.2)} w\n1 J 1 j\n${vectorPath([b.outer, b.slit])}\nS\nQ\nEMC`);
+      cmds.push(`/OC /CutLayer BDC\nq\n/OverprintPlate gs\n${pdfNumber(ptPerMm)} 0 0 ${pdfNumber(-ptPerMm)} ${pdfNumber(xPt)} ${pdfNumber(yTopPt)} cm\n/CutSpot CS\n1 SCN\n${pdfNumber(0.2)} w\n1 J 1 j\n${vectorPath([b.outer, b.slit])}\nS\nQ\nEMC`);
     }
     const contents = await encodeStream(encode(cmds.join('\n') + '\n'));
     const pdf = new PDFWriter();
@@ -209,21 +272,22 @@
     pdf.set(catalog, `<< /Type /Catalog /Pages ${pages} 0 R /OCProperties << /OCGs [${layerRefs}] /D << /Name (Outline Studio Nesting) /BaseState /ON /ON [${layerRefs}] /Order [${layerRefs}] >> >> >>`);
     pdf.set(pages, `<< /Type /Pages /Kids [${page} 0 R] /Count 1 >>`);
     const colorSpaces = `/WhiteSpot [/Separation ${pdfName(whiteName)} /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0 0 0] /N 1 >>] /CutSpot [/Separation ${pdfName(cutName)} /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>]`;
-    const states = `/ArtOverprint << /Type /ExtGState /OP true /op true /OPM 1 >> /WhiteOverprint << /Type /ExtGState /OP true /op true /OPM 1 >> /CutOverprint << /Type /ExtGState /OP true /op true /OPM 1 >>`;
+    const states = `${GSTATE_OPAQUE} ${GSTATE_OVERPRINT}`;
     const xobjects = prepared.map((_, i) => `/Artwork${i} ${imageIds[i].img} 0 R`).join(' ');
     const resources = `<< /XObject << ${xobjects} >> /ColorSpace << ${colorSpaces} >> /ExtGState << ${states} >> /Properties << /ArtLayer ${artLayer} 0 R /WhiteLayer ${whiteLayer} 0 R /CutLayer ${cutLayer} 0 R >> >>`;
     pdf.set(page, `<< /Type /Page /Parent ${pages} 0 R /MediaBox [0 0 ${pdfNumber(pageW)} ${pdfNumber(pageH)}] /Resources ${resources} /Contents ${contentId} 0 R >>`);
     pdf.stream(contentId, contents.filter, contents.bytes);
     prepared.forEach((it, i) => {
-      pdf.stream(imageIds[i].img, `/Type /XObject /Subtype /Image /Width ${it.width} /Height ${it.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask ${imageIds[i].alpha} 0 R${it.rgbStream.filter}`, it.rgbStream.bytes);
+      pdf.stream(imageIds[i].img, `/Type /XObject /Subtype /Image /Width ${it.width} /Height ${it.height} /ColorSpace /DeviceCMYK /BitsPerComponent 8 /SMask ${imageIds[i].alpha} 0 R${it.rgbStream.filter}`, it.rgbStream.bytes);
       pdf.stream(imageIds[i].alpha, `/Type /XObject /Subtype /Image /Width ${it.width} /Height ${it.height} /ColorSpace /DeviceGray /BitsPerComponent 8${it.alphaStream.filter}`, it.alphaStream.bytes);
     });
     const layer = (name) => `<< /Type /OCG /Name ${pdfString(name)} /Usage << /View << /ViewState /ON >> /Print << /PrintState /ON >> >> >>`;
-    pdf.set(artLayer, layer('Artwork'));
-    pdf.set(whiteLayer, layer(`White spot: ${whiteName}`));
-    pdf.set(cutLayer, layer(`Cutline spot: ${cutName}`));
+    pdf.set(artLayer, layer(LAYER.art));
+    pdf.set(whiteLayer, `<< /Type /OCG /Name ${pdfString(LAYER.white)} /WhiteTint ${pdfNumber(tintComponent(whiteTint) * 100)} `
+      + `/Usage << /View << /ViewState /ON >> /Print << /PrintState /ON >> >> >>`);
+    pdf.set(cutLayer, layer(LAYER.cut));
     pdf.set(info, `<< /Producer (Outline Studio) /Creator (Outline Studio Nesting) >>`);
     return pdf.finish(catalog, info);
   }
-  window.OutlinePDF = { create, createSheet };
+  window.OutlinePDF = { create, createSheet, encodeArtwork, _vectorPath: vectorPath };
 })();

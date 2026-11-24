@@ -36,7 +36,12 @@ test('PDF contains separate escaped spot inks, vector paths, and overprint', asy
   assert.match(pdf, /\/Separation \/White#20Ink \/DeviceCMYK/);
   assert.match(pdf, /\/Separation \/Cut#2F1 \/DeviceCMYK/);
   assert.match(pdf, /\/OP true \/op true \/OPM 1/);
-  assert.match(pdf, /\/ArtOverprint << \/Type \/ExtGState \/OP true \/op true \/OPM 1 >>/);
+  assert.match(pdf, /\/OverprintPlate << \/Type \/ExtGState \/OP true \/op true \/OPM 1 >>/);
+  // Opaque artwork knocks out instead of overprinting the white plate.
+  assert.match(pdf, /\/ArtOverprint << \/Type \/ExtGState \/OP false \/op false \/OPM 1/);
+  // CMYK artwork, not RGB.
+  assert.match(pdf, /\/ColorSpace \/DeviceCMYK \/BitsPerComponent 8 \/SMask/);
+  assert.doesNotMatch(pdf, /\/ColorSpace \/DeviceRGB/);
   assert.doesNotMatch(pdf, /\/BM \/Multiply/); // Normal blending avoids changing process plates.
   assert.match(pdf, /\/SMask \d+ 0 R/);
   assert.match(pdf, /\/OCProperties/);

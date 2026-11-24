@@ -38,7 +38,8 @@ test('imports page size, artwork, white and cutline from a finished PDF', async 
   assert.equal(model.H, 240);
   assert.equal(model.images.length, 1, 'raster artwork found');
   assert.equal(model.images[0].info.width, 120);
-  assert.equal(model.images[0].info.colorSpace, '/DeviceRGB');
+  // Exports are CMYK now, and the importer has to round-trip its own output.
+  assert.equal(model.images[0].info.colorSpace, '/DeviceCMYK');
   assert.equal(model.cutPaths.length, 1, 'stroked outline becomes the cutline');
   assert.equal(model.whitePaths.length, 1, 'filled plate becomes white');
 });
@@ -273,4 +274,68 @@ test('a plate far larger than the canvas is downsampled, not encoded in full', a
   assert.ok(emitted.w <= model.W && emitted.h <= model.H,
     `emitted ${emitted.w}x${emitted.h} must not exceed the canvas ${model.W}x${model.H}`);
   assert.ok(emitted.size < 8 * 1024 * 1024, `plates should not be encoded at full size (got ${emitted.size})`);
+});
+
+test('detectNativePpm reads the embedded raster density and caps it at press res', () => {
+  const pt = (mm) => (mm * 72) / 25.4;
+  const doc = {
+    widthMm: 97.2, heightMm: 147.2,
+    images: [{ info: { width: 5301, height: 8135 }, ctm: [pt(93.5), 0, 0, pt(143.5), 0, 0] }],
+  };
+  const ppm = imp.detectNativePpm(doc);
+  assert.ok(Math.abs(ppm * 25.4 - 1440) < 1.5, `expected ~1440 dpi, got ${ppm * 25.4}`);
+  const huge = {
+    widthMm: 97.2, heightMm: 147.2,
+    images: [{ info: { width: 20000, height: 30000 }, ctm: [pt(93.5), 0, 0, pt(143.5), 0, 0] }],
+  };
+  assert.ok(Math.abs(imp.detectNativePpm(huge) - imp.MAX_PPM) < 1e-9, 'density above the press cap is capped');
+  assert.equal(imp.detectNativePpm({ widthMm: 10, heightMm: 10, images: [] }), null, 'vector-only files have no native density');
+  const logo = {
+    widthMm: 100, heightMm: 100,
+    images: [{ info: { width: 4000, height: 4000 }, ctm: [pt(10), 0, 0, pt(10), 0, 0] }],
+  };
+  assert.equal(imp.detectNativePpm(logo), null, 'a tiny logo must not set the job resolution');
+});
+
+test("pixelsPerMm 'native' follows the embedded plate density", async () => {
+  const big = formWrapped({ dw: 1200, dh: 2000 });
+  const model = await imp.extractItemModel(ab(big), { pixelsPerMm: 'native' });
+  assert.equal(model.ppm, model.nativePpm, 'native mode must use the detected density');
+  assert.ok(model.ppm > 12, `plate is denser than the old 305 dpi grid (got ${model.ppm} px/mm)`);
+  const fixed = await imp.extractItemModel(ab(big), { pixelsPerMm: 6 });
+  assert.equal(fixed.ppm, 6, 'an explicit numeric grid still wins');
+});
+
+test('imported white plates are choked inside the artwork silhouette', async () => {
+  global.ClipperLib = global.ClipperLib || require('../vendor/clipper.js');
+  const ppm = 10; // 10 px/mm: a 100 px square is 10 mm
+  const square = [[[0, 0], [100, 0], [100, 100], [0, 100]]];
+  const choked = imp.chokeWhitePaths(square, ppm);
+  assert.ok(choked.length, 'the plate survives the erosion');
+  const xs = choked.flat().map((p) => p[0]);
+  const ys = choked.flat().map((p) => p[1]);
+  const wMm = (Math.max(...xs) - Math.min(...xs)) / ppm;
+  const hMm = (Math.max(...ys) - Math.min(...ys)) / ppm;
+  // 10 mm square eroded 0.3 mm per side; a convex square is unchanged by opening.
+  assert.ok(Math.abs(wMm - 9.4) < 0.05, `width ${wMm} mm should be 10 - 2*0.3`);
+  assert.ok(Math.abs(hMm - 9.4) < 0.05, `height ${hMm} mm should be 10 - 2*0.3`);
+  // A 0.2 mm-wide spike (narrower than twice the opening radius) is removed.
+  const spike = [[[0, 0], [100, 0], [100, 2], [50, 2], [50, 40], [48, 40], [48, 2], [0, 2]]];
+  const opened = imp.chokeWhitePaths(spike, ppm);
+  const ys2 = opened.flat().map((p) => p[1]);
+  assert.ok(Math.max(...ys2) / ppm < 20, 'the hairline finger must not survive the opening');
+  const model = await imp.extractItemModel(ab(formWrapped({ dw: 1200, dh: 2000 })), { pixelsPerMm: 6 });
+  assert.ok(model.whitePaths.length, 'extraction still returns a white plate');
+});
+
+test('a white plate drawn proud of the cut line is clipped back inside it', () => {
+  global.ClipperLib = global.ClipperLib || require('../vendor/clipper.js');
+  const ppm = 10;
+  const plate = [[[-20, -20], [120, -20], [120, 120], [-20, 120]]]; // 2 mm bleed past the cut
+  const cut = [[[0, 0], [100, 0], [100, 100], [0, 100]]];
+  const choked = imp.chokeWhitePaths(plate, ppm, cut);
+  const xs = choked.flat().map((p) => p[0]);
+  const ys = choked.flat().map((p) => p[1]);
+  assert.ok(Math.max(...xs) / ppm <= 9.75, `plate must stay inside the cut (max x ${Math.max(...xs) / ppm} mm)`);
+  assert.ok(Math.min(...ys) / ppm >= 0.25, `plate must stay inside the cut (min y ${Math.min(...ys) / ppm} mm)`);
 });
