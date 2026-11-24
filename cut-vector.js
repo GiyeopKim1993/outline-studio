@@ -23,7 +23,15 @@
   const ARC_TOL_MM = 0.01;         // chord tolerance for analytic arcs
   const SIMPLIFY_TOL_MM = 0.1;     // RDP tolerance for the silhouette loops
   const FIT_TOL_MM = 0.15;         // cubic-fit deviation budget for the final contour
-  const FIT_CORNER_TURN = 0.7;     // rad; windowed turns above this stay exact anchors
+  // All-G1 by default (user-approved 2026-11): no forced corner anchors, every
+  // fitted span is a G1 cubic. Measured on 20 real silhouettes (22 loops):
+  // fitted loops 3 -> 5, anchors 5702 -> 5315 (-6.8%), worst deviation 0.1485 mm
+  // (budget 0.15), zero over-tolerance; corner-anchored chains overshoot into
+  // hair hooks and self-intersect, which is why the old default silently fell
+  // back to exact polylines on 19 of 22 loops. The self-intersection ladder and
+  // polyline fallback stay as the safety net, so a loop that cannot be fitted
+  // simply keeps its exact shape. cornerTurn < PI still re-enables corners.
+  const FIT_CORNER_TURN = Math.PI; // rad; >= PI means no forced corner anchors
   const FIT_MIN_POINTS = 64;       // loops below this stay exact polylines (tabs, bars)
 
   // ---- Ramer-Douglas-Peucker -------------------------------------------------
@@ -231,8 +239,8 @@
     while (pts.length > 1 && Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]) <= 1e-7) pts.pop();
     const n = pts.length;
     if (n < 3) return pts.map(p => p.slice());
-    // True corners stay exact anchors (sharp chain boundaries); smooth runs
-    // between them become G1 cubics. Turn is measured over a ~0.8 mm window on
+    // When cornerTurn < PI: true corners stay exact anchors (sharp chain
+    // boundaries); smooth runs between them become G1 cubics. Turn is measured over a ~0.8 mm window on
     // each side, so 1 px staircase steps (which look like 90 deg between
     // immediate neighbours) average out and do not register as corners.
     const winDir = (i, dir) => {
