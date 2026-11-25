@@ -61,6 +61,8 @@
   function settings(){
     const number=(id,fallback)=>{const el=$(id),value=Number(el.value);return el.value!==''&&Number.isFinite(value)?value:fallback;};
     const height=number('heightInput',148.5),tabDepth=number('tabDepthInput',3),offset=number('offsetInput',2);
+    // `targetHeight` is the long-side budget now (the field name is kept so
+    // saved batch rows stay valid); processPipeline splits it per axis.
     return {targetHeight:height,offset,webWidth:number('webInput',10),gap:number('gapInput',4),
       tabWidth:number('tabWidthInput',30),tabDepth,
       taper:number('taperInput',1),tipR:number('tipRadiusInput',.75),speck:number('speckInput',1),alpha:number('alphaInput',8),
@@ -192,24 +194,38 @@
   function localJunctionBlend(mask,w,h,ppm,cx,top,bottom,scaffoldWidth){const crossings=[...findCrossings(mask,w,h,cx-scaffoldWidth*ppm/2),...findCrossings(mask,w,h,cx+scaffoldWidth*ppm/2)];if(!crossings.length)return {mask,junctions:0};const smooth=closing(mask,w,h,1.5*ppm),out=mask.slice(),r=5*ppm,r2=r*r;for(const [x,y] of crossings){const x0=Math.max(0,Math.floor(x-r)),x1=Math.min(w-1,Math.ceil(x+r)),y0=Math.max(0,Math.floor(y-r)),y1=Math.min(h-1,Math.ceil(y+r));for(let yy=y0;yy<=y1;yy++)for(let xx=x0;xx<=x1;xx++){const dx=xx-x,dy=yy-y;if(dx*dx+dy*dy<=r2)out[yy*w+xx]=smooth[yy*w+xx];}}return {mask:out,junctions:crossings.length};}
 
   async function processPipeline(){
-    if(!state.file)return;const s=settings();const activeHeight=s.targetHeight-2*s.offset-s.tabDepth;
+    if(!state.file)return;const s=settings();
+    // The size input is the LONG SIDE of the final cut: the silhouette is fit
+    // into the budget box below and whichever axis binds lands exactly on it.
+    // Vertically the budget pays 2×offset + tab depth (the tab hangs down);
+    // horizontally it pays only 2×offset.
+    const activeHeight=s.targetHeight-2*s.offset-s.tabDepth,activeWidth=s.targetHeight-2*s.offset;
     const invalid=SETTING_IDS.map($).find(el=>el.value===''||!el.checkValidity());
     if(invalid){setStatus('설정값이 허용 범위를 벗어났습니다. 입력값을 확인하세요.','error');invalid.focus();return;}
-    if(activeHeight<=10){toast('최종 높이가 외곽 여유·탭보다 너무 작습니다.');return;}
+    if(activeHeight<=10||activeWidth<=10){toast('최종 크기가 외곽 여유·탭보다 너무 작습니다.');return;}
     // A failed re-run must never expose stale geometry paired with a new image.
     state.mask=null;state.autoMask=null;state.whitePaths=[];state.whiteAreaMm2=0;state.metrics=null;state.history=[];state.cutLoops=null;state.cutVectorInfo=null;state.dirty=false;state.busy=true;els.fileInput.disabled=true;
     setEnabled(false);els.processBtn.disabled=true;updateWhiteInfo();resetScaffoldInfo('계산 중…');setStatus('알파 마스크 정리 중…','busy');;await sleep();
     try{
       const crop=state.croppedCanvas;
-      const nominalPpm=Math.min(crop.height/activeHeight,MAX_DPI/25.4);
-      let targetPx=Math.round(activeHeight*nominalPpm);
-      let scaledW=Math.max(1,Math.round(crop.width*targetPx/crop.height));
-      if(scaledW*targetPx>MAX_AREA_PX){const f=Math.sqrt(MAX_AREA_PX/(scaledW*targetPx));targetPx=Math.max(1,Math.round(targetPx*f));scaledW=Math.max(1,Math.round(crop.width*targetPx/crop.height));}
+      // Rasterise along the axis that will consume the budget (same choice the
+      // ppm rule below makes on the thresholded bbox): wide artwork is built
+      // to width, tall artwork to height.
+      const wide=crop.width*activeHeight>crop.height*activeWidth;
+      const nominalPpm=Math.min(wide?crop.width/activeWidth:crop.height/activeHeight,MAX_DPI/25.4);
+      let targetPx,scaledW;
+      if(wide){scaledW=Math.max(1,Math.round(activeWidth*nominalPpm));targetPx=Math.max(1,Math.round(crop.height*scaledW/crop.width));}
+      else{targetPx=Math.max(1,Math.round(activeHeight*nominalPpm));scaledW=Math.max(1,Math.round(crop.width*targetPx/crop.height));}
+      if(scaledW*targetPx>MAX_AREA_PX){const f=Math.sqrt(MAX_AREA_PX/(scaledW*targetPx));targetPx=Math.max(1,Math.round(targetPx*f));scaledW=Math.max(1,Math.round(scaledW*f));}
       const scaled=document.createElement('canvas');scaled.width=scaledW;scaled.height=targetPx;scaled.getContext('2d').drawImage(crop,0,0,scaledW,targetPx);
       const scaledData=scaled.getContext('2d').getImageData(0,0,scaledW,targetPx).data,scaledMask=new Uint8Array(scaledW*targetPx);let minX=scaledW,minY=targetPx,maxX=-1,maxY=-1;
       for(let y=0;y<targetPx;y++)for(let x=0;x<scaledW;x++)if(scaledData[(y*scaledW+x)*4+3]>s.alpha){scaledMask[y*scaledW+x]=1;if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;}
       if(maxY<minY)throw new Error('알파 임계값보다 높은 전경 픽셀이 없습니다.');
-      const activePxH=maxY-minY+1,ppm=activePxH/activeHeight;
+      const activePxH=maxY-minY+1,activePxW=maxX-minX+1;
+      // Long-side rule on the thresholded bbox: the ppm that keeps BOTH
+      // budgets, so the binding axis lands exactly on its budget and the
+      // final cut's long side equals the requested size.
+      const ppm=Math.max(activePxW/activeWidth,activePxH/activeHeight);
       const scaledCleaned=removeSmall(scaledMask,scaledW,targetPx,ppm,s.speck);
       if(!scaledCleaned.kept)throw new Error('작은 조각 제거 후 남은 알파 영역이 없습니다. 제거 기준을 낮춰 주세요.');
       const cleanStats=stats(scaledCleaned.mask,scaledW,targetPx);
@@ -295,7 +311,7 @@
       }catch(err){console.warn('벡터 칼선 생성 실패 — 래스터 트레이스로 대체합니다:',err);}
       const cleanedFinal=removeSmall(withTab,w,h,ppm,s.speck).mask;const finalFilled=fillHoles(cleanedFinal,w,h);state.mask=finalFilled.mask;state.autoMask=state.mask.slice();state.history=[];
       const webAdded=beforeWebs.reduce((a,v,i)=>a+((!v&&outline[i])?1:0),0)/(ppm*ppm);
-      state.metrics={source:state.sourceName,activeArtworkHeightMm:activeHeight,pixelsPerMm:ppm,globalOuterOffsetMm:s.offset,targetOverallCutHeightMm:s.targetHeight,
+      state.metrics={source:state.sourceName,activeArtworkHeightMm:activePxH/ppm,activeArtworkWidthMm:activePxW/ppm,pixelsPerMm:ppm,globalOuterOffsetMm:s.offset,targetOverallCutSizeMm:s.targetHeight,longSideRule:true,
         actualCutSizeMm:null,componentsRemoved:cleaned.removed,componentsKept:cleaned.kept,initialHolesFilled:filled.holes,whiteChokeMm:WHITE_CHOKE_MM,whiteOpenMm:WHITE_OPEN_MM,whiteAreaMm2:state.whiteAreaMm2,whiteAlphaThreshold:s.alpha,whiteMinIslandAreaMm2:s.speck,whiteHolesPreserved:true,neckCoreCount:neck.cores,
         detectedWebCount:neck.webs.length,detectedWebs:neck.webs.map(x=>({...x,fromPx:x.fromPx.map(v=>v/ppm),toPx:x.toPx.map(v=>v/ppm)})),neckWebAddedAreaMm2:webAdded,
         outlineWidthBeforeScaffoldMm:scaffold.outlineWidthMm,outlineHeightBeforeScaffoldMm:baseStats.height/ppm,scaffoldWidthMm:scaffoldWidth,scaffoldHeightMm:scaffold.triangle?scaffold.triangle.roundedHeightMm:baseStats.height/ppm,scaffoldMaskSizeMm:[scaffoldStats.width/ppm,scaffoldStats.height/ppm],scaffoldNominalDimensionMm:scaffold.nominalDimensionMm,scaffoldCornerRadiusMm:scaffold.cornerRadiusMm,scaffoldTriangle:scaffold.triangle,scaffoldShape:scaffold.shape,scaffoldTier:scaffold.tier,tabWiderThanScaffold:s.tabWidth>scaffoldWidth,tabWiderThanOutline:s.tabWidth>scaffold.outlineWidthMm,deletedUpperThirdCells:droppedCells,retainedCells:keptCells,gapFillThresholdMm:s.gap,gapFillAreaMm2:gapPixels/(ppm*ppm),tabAttachRaiseMm:(baseStats.maxY-tabTopPx)/ppm,tabAttachBarFallback:barFallback,
